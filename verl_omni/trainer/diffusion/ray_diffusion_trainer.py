@@ -48,6 +48,7 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, shou
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
+from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -79,7 +80,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 )
 from verl_omni.utils.tracking import _export_video, batch_items, log_wandb_media, wrap_val_samples_for_wandb
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
-from verl.utils.memory_utils import aggressive_empty_cache
+
 
 sys_logger = logging.getLogger(__name__)
 

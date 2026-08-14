@@ -81,7 +81,6 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 from verl_omni.utils.tracking import _export_video, batch_items, log_wandb_media, wrap_val_samples_for_wandb
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
-
 sys_logger = logging.getLogger(__name__)
 
 

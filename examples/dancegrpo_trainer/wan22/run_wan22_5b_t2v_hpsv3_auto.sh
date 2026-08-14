@@ -11,6 +11,7 @@
 #
 set -x
 
+export MIMALLOC_PURGE_DELAY=0
 if npu-smi info &>/dev/null; then
     DEVICE="npu"
 elif nvidia-smi &>/dev/null; then

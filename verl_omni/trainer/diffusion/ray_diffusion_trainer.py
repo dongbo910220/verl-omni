@@ -79,6 +79,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 )
 from verl_omni.utils.tracking import _export_video, batch_items, log_wandb_media, wrap_val_samples_for_wandb
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
+from verl.utils.memory_utils import aggressive_empty_cache
 
 sys_logger = logging.getLogger(__name__)
 
@@ -1338,6 +1339,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
+                aggressive_empty_cache()
 
 
 class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):

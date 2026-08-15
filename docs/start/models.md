@@ -149,6 +149,39 @@ BAGEL uses a per-stage deploy YAML that overrides top-level vLLM engine argument
 
 ---
 
+## Text-to-Speech Models
+
+### Qwen3-TTS-12Hz-0.6B Base
+
+| Property | Detail |
+|----------|--------|
+| **Hugging Face ID** | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` |
+| **Architecture** | Autoregressive Talker followed by the frozen Qwen3-TTS code2wav decoder |
+| **Modality** | Text to speech |
+| **Trainer type** | GRPO via `verl_omni.trainer.main_omni` |
+| **FSDP** | FSDP2 over the trainable Talker and codec-0 head |
+| **Rollout** | Two-stage vLLM-Omni pipeline, TP=1 per stage |
+| **Reward** | SenseVoiceSmall tone-aware pinyin error reward |
+
+For data preparation, dependency requirements, consistency diagnostics, and the
+two-GPU recipe, see
+[Examples - Qwen3-TTS GRPO Trainer](../../examples/grpo_trainer/qwen3_tts/README.md).
+
+**Supported trainers:**
+
+| Trainer | Example script | GPU config |
+|---------|---------------|------------|
+| GRPO (AISHELL-3) | `examples/grpo_trainer/qwen3_tts/run_qwen3_tts_aishell3_grpo.sh` | 2xGPU with at least 32 GB each |
+
+The included GPU smoke test validates rollout, waveform reward, the actor
+optimizer path, checkpoint save, and checkpoint restore with the real 0.6B
+model. Proving an optimizer update additionally requires nonconstant
+within-group rewards, nonzero advantages, and a nonzero gradient norm. Full
+training quality must be established with the recipe's fixed held-out
+validation set; a successful smoke test alone is not convergence evidence.
+
+---
+
 ## Omni-Modality Models
 
 ### Qwen3-Omni-30B-A3B Thinker
@@ -190,6 +223,7 @@ rather than a separate per-stage YAML file.
 | SD3.5 Medium | MM-DiT | CLIP-L + CLIP-G + T5 |
 | Wan2.2-TI2V-5B | Wan DiT | T5 |
 | BAGEL | Unified MM | — |
+| Qwen3-TTS-0.6B | Autoregressive Talker + code2wav | Qwen3 |
 | Qwen3-Omni-30B | Omni MoE | Qwen3 |
 
 ---
@@ -202,6 +236,7 @@ rather than a separate per-stage YAML file.
 | Qwen2.5-VL-3B-Instruct | `Qwen/Qwen2.5-VL-3B-Instruct` | Vision-Language | SD3.5 (Flow-GRPO) | vLLM, TP=1, dedicated pool |
 | PickScore | `yuvalkirstain/PickScore_v1` | Vision (preference) | Qwen-Image-Edit (Flow-GRPO), BAGEL (PickScore recipe) | Local CLIP load, async workers |
 | HPSv3 | Local `.safetensors` | Vision (aesthetic) | Wan2.2 (DanceGRPO) | Local safetensors load |
+| SenseVoiceSmall | `FunAudioLLM/SenseVoiceSmall` | Speech recognition | Qwen3-TTS (GRPO) | Local FunASR load, async reward workers |
 | HTTP scorer | External HTTP service | Any | Any model | Gunicorn/Flask, pickle protocol |
 | JPEG incompressibility | Rule-based | Image stats | Any diffusion model | No model process needed |
 
@@ -212,13 +247,14 @@ trainer's README in `examples/`.
 
 ## Which Trainer for Which Model?
 
-| Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Wan2.2 | BAGEL | Qwen3-Omni |
-|-----------|:---:|:---:|:---:|:---:|:---:|:---:|
-| Flow-GRPO | ✅ | ✅ | ✅ | — | ✅ | — |
-| Flow-DPPO | ✅ | — | — | — | — | — |
-| GRPO-Guard | ✅ | — | — | — | — | — |
-| Mix-GRPO | ✅ | — | — | — | — | — |
-| DanceGRPO | — | — | — | ✅ | — | — |
-| Diffusion-DPO | ✅ | — | ✅ | — | — | — |
-| DiffusionNFT | ✅ | — | — | — | — | — |
-| GSPO | — | — | — | — | — | ✅ |
+| Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Wan2.2 | BAGEL | Qwen3-TTS | Qwen3-Omni |
+|-----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| GRPO | — | — | — | — | — | ✅ | — |
+| Flow-GRPO | ✅ | ✅ | ✅ | — | ✅ | — | — |
+| Flow-DPPO | ✅ | — | — | — | — | — | — |
+| GRPO-Guard | ✅ | — | — | — | — | — | — |
+| Mix-GRPO | ✅ | — | — | — | — | — | — |
+| DanceGRPO | — | — | — | ✅ | — | — | — |
+| Diffusion-DPO | ✅ | — | ✅ | — | — | — | — |
+| DiffusionNFT | ✅ | — | — | — | — | — | — |
+| GSPO | — | — | — | — | — | — | ✅ |

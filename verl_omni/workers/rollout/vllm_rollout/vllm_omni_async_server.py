@@ -13,6 +13,7 @@
 # limitations under the License.
 import argparse
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -92,6 +93,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # It should be automatically inferred from the model config
         self._ar_mode = omni_kwargs.get("output_mode", "diffusion") == "ar"
         self._rollout_flags: dict[int, dict] = {}
+        self._omni_rollout_adapter = None
+        self._omni_pipeline_mode = "thinker_only"
+        self._rollout_output_modalities: list[str] | None = None
+        self._weight_sync_stage_ids: list[int] | None = None
+        self._stage_sampling_constraints: dict[int, dict[str, Any]] = {}
 
         if self._ar_mode:
             return omega_conf_to_dataclass(model_config, dataclass_type=OmniModelConfig)
@@ -161,10 +167,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
             adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
             if adapter_cls is not None:
+                if self.config.free_cache_engine and not adapter_cls.supports_cache_engine_sleep(pipeline_mode):
+                    raise ValueError(
+                        f"Rollout pipeline {pipeline_name!r} does not support cache-engine sleep/wake; "
+                        "set actor_rollout_ref.rollout.free_cache_engine=false."
+                    )
+                self._omni_rollout_adapter = adapter_cls
+                self._omni_pipeline_mode = pipeline_mode
                 # Generate deploy config using the adapter's stage topology.
                 self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, pipeline_mode)
                 # Store per-stage rollout flags for downstream use.
                 self._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=pipeline_mode)
+                self._rollout_output_modalities = adapter_cls.get_output_modalities(pipeline_mode=pipeline_mode)
+                self._weight_sync_stage_ids = adapter_cls.weight_sync_stage_ids(pipeline_mode=pipeline_mode)
                 # Merge pipeline-specific HF config overrides.
                 adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=pipeline_mode)
                 if adapter_overrides:
@@ -195,12 +210,28 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         adapter_cls.ensure_pipeline_registered(pipeline_mode)
         stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
         pipeline_id = adapter_cls.get_pipeline_id(pipeline_mode)
+        self._stage_sampling_constraints = {
+            stage.stage_id: dict(getattr(stage, "sampling_constraints", {}) or {}) for stage in stages
+        }
+        stage_extras = {
+            stage.stage_id: dict(adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode))
+            for stage in stages
+        }
+        capacity_fields = ("max_model_len", "max_num_batched_tokens")
+        if any(field in extras for extras in stage_extras.values() for field in capacity_fields):
+            for extras in stage_extras.values():
+                for field in capacity_fields:
+                    extras.setdefault(field, getattr(self.config, field))
+            for field in capacity_fields:
+                engine_kwargs[field] = None
 
         device_control_env = get_visible_devices_keyword()
         visible_devices = os.environ.get(device_control_env, "")
         tp_size = self.config.tensor_model_parallel_size
 
         deploy_dict: dict[str, object] = {"pipeline": pipeline_id}
+        if "async_chunk" in engine_kwargs:
+            deploy_dict["async_chunk"] = bool(engine_kwargs["async_chunk"])
 
         if visible_devices:
             # Stage configs use logical ids relative to the Ray actor's visible-device set.
@@ -212,7 +243,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     "stage_id": sid,
                     "devices": devices,
                     "tensor_parallel_size": tp_size,
-                    "engine_extras": adapter_cls.get_stage_engine_extras(sid, pipeline_mode=pipeline_mode),
+                    "engine_extras": stage_extras[sid],
                 }
                 for sid in stage_ids
             ]
@@ -245,6 +276,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         deploy_config = getattr(args, "deploy_config", None)
         if deploy_config:
             engine_args["deploy_config"] = deploy_config
+
+        if self._omni_rollout_adapter is not None:
+            # Per-stage deploy config owns model_stage for heterogeneous
+            # pipelines; do not let the umbrella model config override it.
+            engine_args["model_stage"] = None
 
         if self._ar_mode:
             for timeout_key in ("stage_init_timeout", "init_timeout"):
@@ -304,6 +340,24 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
     # wake_up hook: Omni does not restore KV cache on wake-up
     # -----------------------------------------------------------------------
+
+    async def collective_rpc(
+        self,
+        method,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict[str, Any] | None = None,
+    ):
+        stage_ids = None
+        if method in {"set_pending_lora_peft_config", "update_weights_from_ipc"}:
+            stage_ids = self._weight_sync_stage_ids
+        return await self.engine.collective_rpc(
+            method=method,
+            timeout=timeout,
+            args=args,
+            kwargs=kwargs,
+            stage_ids=stage_ids,
+        )
 
     def _get_wake_up_tags(self) -> list[str]:
         return ["weights"]
@@ -477,10 +531,22 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 processor = getattr(self.model_config, "processor", None)
                 if processor is not None and hasattr(processor, "dedup_pad_tokens"):
                     prompt_ids = processor.dedup_pad_tokens(prompt_ids)
-            max_possible_tokens = self.config.max_model_len - len(prompt_ids)
+
+            prompt = None
+            adapter_prepared_prompt = False
+            if self._omni_rollout_adapter is not None:
+                prompt = self._omni_rollout_adapter.prepare_engine_prompt(
+                    prompt_ids=prompt_ids,
+                    model_config=self.model_config,
+                    multi_modal_data=multi_modal_data,
+                    mm_processor_kwargs=mm_processor_kwargs,
+                )
+                adapter_prepared_prompt = prompt is not None
+            effective_prompt_ids = prompt.get("prompt_token_ids", prompt_ids) if prompt is not None else prompt_ids
+            max_possible_tokens = self.config.max_model_len - len(effective_prompt_ids)
             if max_possible_tokens <= 0:
                 raise ValueError(
-                    f"Prompt length ({len(prompt_ids)}) meets or exceeds the model's maximum context length "
+                    f"Prompt length ({len(effective_prompt_ids)}) meets or exceeds the model's maximum context length "
                     f"({self.config.max_model_len}), leaving no space for generation."
                 )
 
@@ -491,7 +557,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             else:
                 max_tokens = min(
                     self.config.response_length,
-                    self.config.prompt_length + self.config.response_length - len(prompt_ids),
+                    self.config.prompt_length + self.config.response_length - len(effective_prompt_ids),
                 )
             max_tokens = max(0, min(max_tokens, max_possible_tokens))
 
@@ -505,13 +571,25 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             else:
                 sampling_params["logprobs"] = None
             sampling_params.setdefault("repetition_penalty", getattr(self.config, "repetition_penalty", 1.0))
-            params = SamplingParams(max_tokens=max_tokens, **sampling_params)
+            policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
+            default_params = list(getattr(self.engine, "default_sampling_params_list", []) or [])
+            if len(default_params) > 1:
+                params = copy.deepcopy(default_params)
+                constrained = self._stage_sampling_constraints.get(0, {})
+                for field in {"max_tokens", *sampling_params} - constrained.keys():
+                    setattr(params[0], field, getattr(policy_params, field))
+            else:
+                params = policy_params
 
-            prompt = {"prompt_token_ids": prompt_ids}
+            if prompt is None:
+                prompt = {"prompt_token_ids": prompt_ids}
+            additional_information = prompt.get("additional_information")
+            if isinstance(additional_information, dict):
+                additional_information.setdefault("max_new_tokens", [max_tokens])
             if multi_modal_data:
-                prompt["multi_modal_data"] = multi_modal_data
-            if mm_processor_kwargs:
-                prompt["mm_processor_kwargs"] = mm_processor_kwargs
+                prompt.setdefault("multi_modal_data", multi_modal_data)
+            if mm_processor_kwargs and not adapter_prepared_prompt:
+                prompt.setdefault("mm_processor_kwargs", mm_processor_kwargs)
             return prompt, params
 
         # diffusion
@@ -553,13 +631,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def _run_generation(self, prompt, params, request_id: str, lora_request, priority: int):
         """Drive the engine and return the final OmniRequestOutput."""
         if self._ar_mode:
-            generator = self.engine.generate(
+            generate_kwargs = dict(
                 prompt=prompt,
                 sampling_params_list=params,
                 request_id=request_id,
                 lora_request=lora_request,
                 priority=priority,
             )
+            if self._rollout_output_modalities is not None:
+                generate_kwargs["output_modalities"] = self._rollout_output_modalities
+            generator = self.engine.generate(**generate_kwargs)
         else:
             generator = self.engine.generate(
                 prompt=prompt,
@@ -567,8 +648,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 sampling_params_list=params,
             )
         final_res: Optional[OmniRequestOutput] = None
+        retained_outputs = [] if self._rollout_output_modalities is not None else None
         async for output in generator:
             final_res = output
+            if retained_outputs is not None:
+                retained_outputs.append(output)
+        if retained_outputs is not None and self._omni_rollout_adapter is not None:
+            final_res, rollout_fields = self._omni_rollout_adapter.combine_engine_outputs(retained_outputs, prompt)
+            if final_res is not None and rollout_fields:
+                final_res._verl_omni_rollout_fields = rollout_fields
         return final_res
 
     def _process_output(self, final_res, params, sampling_params: dict[str, Any]):
@@ -582,14 +670,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 raise RuntimeError("AR mode expects request_output with token IDs, but got None.")
 
             extra_fields = {"global_steps": self.global_steps}
+            extra_fields.update(getattr(final_res, "_verl_omni_rollout_fields", {}))
             token_ids = req_output.outputs[0].token_ids
             log_probs = None
-            if params.logprobs is not None:
+            policy_params = params[0] if isinstance(params, list) else params
+            if policy_params.logprobs is not None:
                 log_probs = [
                     logprobs[token_ids[i]].logprob for i, logprobs in enumerate(req_output.outputs[0].logprobs)
                 ]
 
             finish_reason = req_output.outputs[0].finish_reason
+            extra_fields["finish_reason"] = finish_reason
             stop_reason = self._map_stop_reason(finish_reason)
 
             num_preempted = None

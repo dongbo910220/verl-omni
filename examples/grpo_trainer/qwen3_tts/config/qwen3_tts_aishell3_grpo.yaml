@@ -1,0 +1,179 @@
+# Qwen3-TTS 0.6B GRPO on public AISHELL-3 text, validated on two 32 GB GPUs.
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+    - pkg://verl_omni.trainer.config
+
+defaults:
+  - ppo_trainer
+  - omni/model@actor_rollout_ref.model: omni_model
+  - _self_
+
+data:
+  seed: 42
+  train_batch_size: 16
+  dataloader_num_workers: 0
+  max_prompt_length: 256
+  max_response_length: 360
+  val_max_samples: 100
+  validation_shuffle: false
+  filter_overlong_prompts: true
+  truncation: error
+
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen3-TTS-12Hz-0.6B-Base
+    model_stage: talker
+    hf_config_name: talker_config
+    custom_chat_template: "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+    trust_remote_code: true
+    external_lib: verl_omni.pipelines.qwen3_tts.talker_training_adapter
+    use_remove_padding: false
+    enable_gradient_checkpointing: true
+    override_config:
+      attn_implementation: sdpa
+      tts_language: Auto
+      tts_spk_embed_path: null
+
+  actor:
+    _target_: verl_omni.workers.config.omni.OmniActorConfig
+    trainer_type: ${algorithm.trainer_type}
+    strategy: fsdp
+    ppo_mini_batch_size: 16
+    ppo_micro_batch_size_per_gpu: 1
+    use_dynamic_bsz: false
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    ppo_epochs: 1
+    shuffle: false
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.2
+    entropy_coeff: 0.0
+    loss_agg_mode: token-mean
+    use_torch_compile: false
+    policy_loss:
+      loss_mode: vanilla
+    optim:
+      lr: 2.0e-7
+      lr_warmup_steps: 0
+      weight_decay: 0.0
+      clip_grad: 1.0
+    checkpoint:
+      save_contents: [model, optimizer, extra]
+      load_contents: [model, optimizer, extra]
+    fsdp_config:
+      fsdp_size: 2
+      seed: 42
+      model_dtype: bfloat16
+      param_offload: false
+      optimizer_offload: false
+      use_orig_params: true
+      use_torch_compile: false
+      wrap_policy:
+        min_num_params: 10000000000
+
+  rollout:
+    name: vllm_omni
+    mode: async
+    n: 4
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.20
+    max_num_seqs: 8
+    max_num_batched_tokens: 1024
+    free_cache_engine: false
+    calculate_log_probs: true
+    load_format: safetensors
+    layered_summon: true
+    enable_prefix_caching: false
+    enforce_eager: true
+    log_prob_micro_batch_size_per_gpu: 1
+    agent:
+      num_workers: 8
+      default_agent_loop: qwen3_tts_single_turn
+    engine_kwargs:
+      vllm_omni:
+        seed: 42
+        output_mode: ar
+        pipeline_name: qwen3_tts_rl
+        pipeline_mode: full
+        async_chunk: false
+        attention_config:
+          backend: TRITON_ATTN
+    val_kwargs:
+      n: 1
+      do_sample: true
+      temperature: 0.8
+      top_p: 0.95
+      top_k: 25
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 1
+    strategy: fsdp
+    fsdp_config:
+      fsdp_size: 2
+      seed: 42
+      param_offload: false
+      model_dtype: bfloat16
+      use_orig_params: true
+      wrap_policy:
+        min_num_params: 10000000000
+
+algorithm:
+  _target_: verl_omni.trainer.config.OmniAlgoConfig
+  trainer_type: policy_gradient
+  sample_source: online
+  paired_preference: false
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true
+  global_std: false
+  use_kl_in_reward: false
+  rollout_correction:
+    rollout_is: null
+    rollout_rs: null
+
+reward:
+  num_workers: 1
+  custom_reward_function:
+    path: pkg://verl_omni.utils.reward_score.tts.sensevoice_pinyin_reward
+    name: compute_score
+    reward_kwargs:
+      sensevoice_model: FunAudioLLM/SenseVoiceSmall
+      sensevoice_device: cuda:0
+      language: zh
+      normalizer_cache_dir: outputs/qwen3_tts_aishell3_grpo/zh_tn_cache
+      reward_alpha: 3.0
+      max_asr_duration_s: 30.0
+      asr_max_retries: 1
+  reward_manager:
+    source: importlib
+    name: AudioRewardManager
+    module:
+      path: pkg://verl_omni.reward_loop.reward_manager
+  audio:
+    score_threads: 1
+    dump_dir: outputs/qwen3_tts_aishell3_grpo/audio
+    dump_validation_only: true
+
+trainer:
+  v1:
+    trainer_mode: omni_sync
+  val_before_train: true
+  balance_batch: true
+  critic_warmup: 0
+  logger: [console, wandb]
+  project_name: qwen3_tts_grpo
+  experiment_name: qwen3_tts_0_6b_aishell3_pinyin
+  nnodes: 1
+  n_gpus_per_node: 2
+  validation_data_dir: outputs/qwen3_tts_aishell3_grpo/validation
+  rollout_data_dir: outputs/qwen3_tts_aishell3_grpo/rollout
+  log_val_generations: 100
+  save_freq: 20
+  test_freq: 20
+  total_training_steps: 100
+  max_actor_ckpt_to_keep: 10
+  resume_mode: disable

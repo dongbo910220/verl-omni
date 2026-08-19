@@ -133,26 +133,44 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
         if not text:
             raise ValueError("Qwen3-TTS received an empty text prompt.")
         speaker_path = model_config.override_config.get("tts_spk_embed_path")
-        if not speaker_path:
-            raise ValueError("Set actor_rollout_ref.model.override_config.tts_spk_embed_path.")
+        replay_layout = str(model_config.override_config.get("tts_replay_layout", "concatenated"))
+        if replay_layout not in ("concatenated", "interleaved"):
+            raise ValueError("tts_replay_layout must be 'concatenated' or 'interleaved'.")
+        if replay_layout == "concatenated" and not speaker_path:
+            raise ValueError("Concatenated Qwen3-TTS rollout requires tts_spk_embed_path.")
         language = require_auto_language(model_config.override_config.get("tts_language", "Auto"))
         hf_config = getattr(model_config, "hf_config", None)
         talker_config = getattr(hf_config, "talker_config", hf_config)
         if talker_config is not None and getattr(talker_config, "codec_eos_token_id", None) is not None:
             cls._codec_eos_token_id = int(talker_config.codec_eos_token_id)
         additional_information = {
-            "task_type": ["Base"],
+            # VoiceDesign uses the same no-speaker codec prefix as mlx-audio's
+            # Base generate(ref_audio=None) path. It does not require a VoiceDesign checkpoint.
+            "task_type": ["Base" if speaker_path else "VoiceDesign"],
             "text": [text],
             "language": [language],
-            "x_vector_only_mode": [True],
-            "non_streaming_mode": [True],
-            "voice_clone_prompt": [{"ref_spk_embedding": _load_speaker_vector(speaker_path)}],
+            "non_streaming_mode": [replay_layout != "interleaved"],
         }
+        if speaker_path:
+            additional_information.update(
+                {
+                    "x_vector_only_mode": [True],
+                    "voice_clone_prompt": [{"ref_spk_embedding": _load_speaker_vector(speaker_path)}],
+                }
+            )
         assistant_ids = model_config.tokenizer(build_assistant_text(text), padding=False)["input_ids"]
         assistant_ids = torch.as_tensor(assistant_ids).reshape(-1).tolist()
-        identity = "\0".join((text, str(language), str(speaker_path))).encode()
+        if replay_layout == "interleaved":
+            # Streaming prefill contains role(3), codec prefix(4 without a
+            # speaker, 5 with one), and the first text token(1).
+            prompt_length = 9 if speaker_path else 8
+        else:
+            # Legacy non-streaming x-vector layout includes the full text and
+            # therefore tracks the assistant-template token count.
+            prompt_length = len(assistant_ids) + 2
+        identity = "\0".join((text, str(language), str(speaker_path), replay_layout)).encode()
         return {
-            "prompt_token_ids": [1] * (len(assistant_ids) + 2),
+            "prompt_token_ids": [1] * prompt_length,
             "additional_information": additional_information,
             "cache_salt": hashlib.sha256(identity).hexdigest(),
         }
@@ -190,9 +208,11 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
         fields = {
             "tts_audio_codes": align_audio_codes(audio_codes, token_ids),
             "tts_text": prompt["additional_information"]["text"][0],
+            "tts_generation_length": len(token_ids),
         }
         if cls._codec_eos_token_id is not None:
             fields["tts_codec_eos_token_id"] = cls._codec_eos_token_id
+            fields["tts_has_eos"] = bool(token_ids and token_ids[-1] == cls._codec_eos_token_id)
         if waveform is not None:
             fields["tts_audio"] = waveform.float().reshape(-1)
         if sample_rate is not None:

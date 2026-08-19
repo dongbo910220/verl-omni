@@ -73,6 +73,14 @@ class TalkerBatch:
     speaker_slots: list[int]
 
 
+@dataclass
+class InterleavedTalkerBatch:
+    inputs_embeds: torch.Tensor
+    attention_mask: torch.Tensor
+    codec_lens: list[int]
+    logit_start: list[int]
+
+
 def build_talker_batch(
     text_ids,
     audio_codes,
@@ -178,12 +186,101 @@ def codec0_logits(talker, batch: TalkerBatch, speaker_embedding: torch.Tensor) -
     return output.logits
 
 
-def mask_codec0_logits(logits: torch.Tensor, codebook_vocab: int, codec_eos_token_id: int) -> torch.Tensor:
-    valid = torch.zeros(logits.shape[-1], dtype=torch.bool, device=logits.device)
-    valid[1 : min(codebook_vocab, logits.shape[-1])] = True
-    if 0 <= codec_eos_token_id < logits.shape[-1]:
-        valid[codec_eos_token_id] = True
-    return logits.masked_fill(~valid, -1e4)
+def _project_text(talker, token_ids: torch.Tensor) -> torch.Tensor:
+    embeddings = talker.model.text_embedding(token_ids)
+    if getattr(talker, "text_projection", None) is not None:
+        embeddings = talker.text_projection(embeddings)
+    return embeddings
+
+
+def build_interleaved_talker_batch(
+    talker,
+    text_ids,
+    audio_codes,
+    tokens,
+    *,
+    speaker_embedding=None,
+    sub_codebook_vocab=None,
+) -> InterleavedTalkerBatch:
+    """Replay the exact streamed text-plus-codec inputs used by generation.
+
+    ``text_ids`` contains the assistant role and text, with the five-token chat
+    trailer already removed by the rollout adapter.  The first text token is
+    consumed by the prefill; decode steps consume the remaining text tokens,
+    then TTS EOS, then TTS PAD.
+    """
+    codec_embedding = talker.model.codec_embedding
+    sub_embeddings = talker.code_predictor.get_input_embeddings()
+    sequences = []
+    codec_lens = []
+    logit_starts = []
+
+    for index, (sample_text, sample_codes) in enumerate(zip(text_ids, audio_codes, strict=True)):
+        ids = sample_text.reshape(-1).long()
+        codes = sample_codes.long()
+        if ids.numel() < 4:
+            raise ValueError("Qwen3-TTS assistant text must contain its three-token role and text.")
+        if codes.ndim != 2 or codes.shape[-1] != NUM_CODEBOOKS or not codes.shape[0]:
+            raise ValueError("Qwen3-TTS codec codes must have shape (nonzero frames, 16).")
+        if sub_codebook_vocab is not None:
+            codes = codes.clone()
+            codes[:, 1:].clamp_(0, sub_codebook_vocab - 1)
+
+        text_embeddings = _project_text(talker, ids)
+        special_ids = ids.new_tensor([tokens.tts_bos, tokens.tts_eos, tokens.tts_pad])
+        tts_bos, tts_eos, tts_pad = _project_text(talker, special_ids).split(1, dim=0)
+
+        prefix_ids = ids.new_tensor([tokens.codec_nothink, tokens.codec_think_bos, tokens.codec_think_eos])
+        suffix_ids = ids.new_tensor([tokens.codec_pad, tokens.codec_bos])
+        codec_prefix = codec_embedding(prefix_ids)
+        sample_speaker = None if speaker_embedding is None else speaker_embedding[index : index + 1]
+        if sample_speaker is not None:
+            sample_speaker = sample_speaker.to(device=codec_prefix.device, dtype=codec_prefix.dtype)
+            codec_prefix = torch.cat((codec_prefix, sample_speaker, codec_embedding(suffix_ids)), dim=0)
+        else:
+            codec_prefix = torch.cat((codec_prefix, codec_embedding(suffix_ids)), dim=0)
+
+        pad_count = codec_prefix.shape[0] - 2
+        combined_text = torch.cat((tts_pad.expand(pad_count, -1), tts_bos), dim=0)
+        combined = combined_text + codec_prefix[:-1]
+        first_text = text_embeddings[3:4] + codec_prefix[-1:]
+        prefill = torch.cat((text_embeddings[:3], combined, first_text), dim=0)
+
+        trailing = torch.cat((text_embeddings[4:], tts_eos), dim=0)
+        frame_inputs = []
+        for frame in range(codes.shape[0] - 1):
+            if frame < trailing.shape[0]:
+                streamed_text = trailing[frame : frame + 1]
+            else:
+                streamed_text = tts_pad
+            codec_parts = [codec_embedding(codes[frame : frame + 1, 0])]
+            for codebook in range(1, NUM_CODEBOOKS):
+                codec_parts.append(sub_embeddings[codebook - 1](codes[frame : frame + 1, codebook]))
+            # Generation concatenates all 16 codebook embeddings and reduces
+            # them in one torch.sum. Keep the same BF16 reduction order here.
+            streamed_codec = torch.cat(codec_parts, dim=0).sum(dim=0, keepdim=True)
+            frame_inputs.append(streamed_text + streamed_codec)
+
+        sequence = torch.cat((prefill, *frame_inputs), dim=0) if frame_inputs else prefill
+        sequences.append(sequence)
+        codec_lens.append(int(codes.shape[0]))
+        logit_starts.append(int(prefill.shape[0] - 1))
+
+    inputs_embeds = torch.nn.utils.rnn.pad_sequence(sequences, batch_first=True)
+    attention_mask = torch.zeros(inputs_embeds.shape[:2], dtype=torch.long, device=inputs_embeds.device)
+    for index, sequence in enumerate(sequences):
+        attention_mask[index, : sequence.shape[0]] = 1
+    return InterleavedTalkerBatch(inputs_embeds, attention_mask, codec_lens, logit_starts)
+
+
+def interleaved_codec0_logits(talker, batch: InterleavedTalkerBatch) -> torch.Tensor:
+    output = talker(
+        inputs_embeds=batch.inputs_embeds,
+        attention_mask=batch.attention_mask,
+        use_cache=False,
+        output_hidden_states=False,
+    )
+    return output.logits
 
 
 def tts_actor_logits(
@@ -216,19 +313,32 @@ def tts_actor_logits(
 
     talker = model.talker
     sub_vocab = int(talker.code_predictor.get_input_embeddings()[0].num_embeddings)
-    batch = build_talker_batch(
-        texts,
-        codes,
-        TalkerTokens.from_config(model.config),
-        device=input_ids.device,
-        sub_codebook_vocab=sub_vocab,
-    )
-    raw_logits = codec0_logits(talker, batch, speaker_embedding)
-    logits = mask_codec0_logits(
-        raw_logits,
-        sub_vocab,
-        int(model.config.talker_config.codec_eos_token_id),
-    )
+    tokens = TalkerTokens.from_config(model.config)
+    replay_layout = str(getattr(model.config, "tts_replay_layout", "concatenated"))
+    if replay_layout == "interleaved":
+        batch = build_interleaved_talker_batch(
+            talker,
+            texts,
+            codes,
+            tokens,
+            speaker_embedding=speaker_embedding,
+            sub_codebook_vocab=sub_vocab,
+        )
+        raw_logits = interleaved_codec0_logits(talker, batch)
+    elif replay_layout == "concatenated":
+        batch = build_talker_batch(
+            texts,
+            codes,
+            tokens,
+            device=input_ids.device,
+            sub_codebook_vocab=sub_vocab,
+        )
+        raw_logits = codec0_logits(talker, batch, speaker_embedding)
+    else:
+        raise ValueError(f"Unsupported Qwen3-TTS replay layout: {replay_layout!r}.")
+    # Match vLLM raw_logprobs and the MLX objective: score sampled tokens under
+    # the complete model distribution before suppress/top-k/top-p processing.
+    logits = raw_logits
     output_vocab = max(logits.shape[-1], int(input_ids.max()) + 1)
     aligned = logits.new_zeros((batch_size, output_len, output_vocab))
     for index, response_start in enumerate(response_starts):

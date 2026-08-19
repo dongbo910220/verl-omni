@@ -56,6 +56,24 @@ def test_rollout_adapter_builds_unique_prompt_and_scopes_weight_sync(tmp_path):
     assert Qwen3TTSRolloutAdapter.get_output_modalities("full") == ["latent", "audio"]
 
 
+def test_rollout_adapter_builds_exact_streaming_no_speaker_prompt():
+    model_config = SimpleNamespace(
+        tokenizer=_Tokenizer(),
+        override_config={"tts_replay_layout": "interleaved", "tts_language": "Auto"},
+        hf_config=SimpleNamespace(talker_config=SimpleNamespace(codec_eos_token_id=2150)),
+    )
+
+    prompt = Qwen3TTSRolloutAdapter.prepare_engine_prompt([1], model_config, {})
+
+    assert len(prompt["prompt_token_ids"]) == 8
+    assert prompt["additional_information"] == {
+        "task_type": ["VoiceDesign"],
+        "text": ["first text"],
+        "language": ["Auto"],
+        "non_streaming_mode": [False],
+    }
+
+
 def test_talker_adapter_pads_exact_rollout_fields_for_actor_forward():
     model_inputs = {"input_ids": torch.zeros(2, 6, dtype=torch.long)}
     micro_batch = {
@@ -72,6 +90,29 @@ def test_talker_adapter_pads_exact_rollout_fields_for_actor_forward():
     assert prepared["text_len"].tolist() == [2, 3]
     assert prepared["response_len"].tolist() == [3, 2]
     assert not prepared["tts_audio_codes"][1, 2].any()
+
+
+def test_talker_adapter_neutralizes_temperature_for_raw_policy_logprobs():
+    output_args = {
+        "temperature": torch.tensor([0.9, 0.8]),
+        "temperature_rmpad": torch.tensor([0.9, 0.9, 0.8]),
+        "other": True,
+    }
+    model_config = SimpleNamespace(override_config={"tts_policy_logprobs_mode": "raw_logprobs"})
+
+    prepared = Qwen3TTSTalkerAdapter.prepare_logprob_output_args(output_args, None, model_config)
+
+    torch.testing.assert_close(prepared["temperature"], torch.ones(2))
+    torch.testing.assert_close(prepared["temperature_rmpad"], torch.ones(3))
+    assert prepared["other"] is True
+    torch.testing.assert_close(output_args["temperature"], torch.tensor([0.9, 0.8]))
+
+
+def test_talker_adapter_rejects_unknown_policy_logprobs_mode():
+    model_config = SimpleNamespace(override_config={"tts_policy_logprobs_mode": "raw_logits"})
+
+    with pytest.raises(ValueError, match="Unsupported Qwen3-TTS policy logprobs mode"):
+        Qwen3TTSTalkerAdapter.prepare_logprob_output_args({}, None, model_config)
 
 
 def test_rollout_adapter_combines_policy_codes_and_waveform():
@@ -98,6 +139,8 @@ def test_rollout_adapter_combines_policy_codes_and_waveform():
     assert fields["tts_audio_sample_rate"] == 24_000
     assert fields["tts_text"] == "first text"
     assert fields["tts_codec_eos_token_id"] == 2150
+    assert fields["tts_generation_length"] == 3
+    assert fields["tts_has_eos"] is True
 
 
 def test_bucketed_weight_sync_rebuilds_derived_codec_table_once(monkeypatch):

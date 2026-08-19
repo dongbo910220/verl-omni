@@ -444,9 +444,11 @@ actor_rollout_ref:
     architecture: null
     model_stage: thinker
     hf_config_name: null
+    lora_dropout: 0.0
     lora_dtype: null
     lora_init_weights: gaussian
     target_parameters: null
+    reference_adapter_name: null
     policy_state_adapters:
     - default
     fsdp_layer_prefixes: []
@@ -811,7 +813,7 @@ algorithm:
   _target_: verl_omni.trainer.config.OmniAlgoConfig
   gamma: 1.0
   lam: 1.0
-  adv_estimator: dpo
+  adv_estimator: grpo
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false
   kl_penalty: kl
@@ -825,9 +827,9 @@ algorithm:
   pf_ppo:
     reweight_method: pow
     weight_pow: 2.0
-  trainer_type: direct_preference
-  sample_source: offline
-  paired_preference: true
+  trainer_type: policy_gradient
+  sample_source: online
+  paired_preference: false
   global_std: true
 distillation:
   _target_: verl.workers.config.DistillationConfig

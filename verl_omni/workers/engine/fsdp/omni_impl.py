@@ -72,6 +72,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         adapter_cls = getattr(self, "model_adapter_cls", None)
         if adapter_cls is not None:
             model_inputs = adapter_cls.prepare_model_inputs(model_inputs, micro_batch, self.model_config)
+            output_args = adapter_cls.prepare_logprob_output_args(output_args, micro_batch, self.model_config)
         return model_inputs, output_args
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):

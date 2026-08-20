@@ -43,6 +43,8 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
 )
 from verl_omni.utils.fs import resolve_model_local_dir
 
+_MLX_GRPO_EXTERNAL_MODULE = "verl_omni.utils.mlx_audio_grpo_compat"
+
 __all__ = [
     "RayTrainerTaskRunner",
     "get_ray_trainer_cls",
@@ -329,6 +331,20 @@ def uses_v1_trainer(config) -> bool:
 
 def run_omni(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed Omni training."""
+    if (
+        OmegaConf.select(config, "algorithm.adv_estimator") == "mlx_grpo"
+        or OmegaConf.select(config, "actor_rollout_ref.actor.kl_loss_type") == "mlx_k3"
+    ):
+        # Register in this process and force the same registration in every Ray process.
+        from verl_omni.utils.mlx_audio_grpo_compat import install_mlx_audio_grpo_compat
+
+        install_mlx_audio_grpo_compat()
+        current_modules = os.environ.get("VERL_USE_EXTERNAL_MODULES", "")
+        modules = [module for module in current_modules.split(",") if module]
+        if _MLX_GRPO_EXTERNAL_MODULE not in modules:
+            modules.append(_MLX_GRPO_EXTERNAL_MODULE)
+        os.environ["VERL_USE_EXTERNAL_MODULES"] = ",".join(modules)
+
     if uses_v1_trainer(config):
         from verl.trainer.main_ppo import TaskRunnerV1, run_ppo
 

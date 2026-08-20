@@ -55,6 +55,7 @@ from verl_omni.trainer.omni.omni_algos import (
 )
 from verl_omni.utils.dataset.offline_mllm_dpo_dataset import get_batch_modality
 from verl_omni.utils.metrics_utils import GroupedMetricMean
+from verl_omni.utils.rollout_actor_trace import install_probability_trace_from_env
 from verl_omni.workers.config import OmniModelConfig
 
 sys_logger = logging.getLogger(__name__)
@@ -65,6 +66,29 @@ __all__ = ["OmniPPOTrainerSync", "OmniDirectPreferenceRayTrainer"]
 @register_trainer("omni_sync")
 class OmniPPOTrainerSync(PPOTrainerSync):
     """``PPOTrainerSync`` subclass that wires tokenizer/processor from ``OmniModelConfig``."""
+
+    def _setup(self):
+        install_probability_trace_from_env()
+        model_config = self.config.actor_rollout_ref.model
+        lora_rank = model_config.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = model_config.get("lora_rank", 0)
+        ref_in_actor = lora_rank > 0 or model_config.get("lora_adapter_path") is not None
+
+        if not (self.use_reference_policy and ref_in_actor):
+            return super()._setup()
+
+        # Older verl revisions look up ActorRolloutRef even though their resource
+        # mapping correctly colocates a LoRA reference policy in ActorRollout.
+        use_reference_policy = self.use_reference_policy
+        self.use_reference_policy = False
+        try:
+            super()._setup()
+        finally:
+            self.use_reference_policy = use_reference_policy
+
+        self.ref_in_actor = True
+        self.ref_policy_wg = self.actor_rollout_wg
 
     def _init_tokenizer(self):
         # Skip super(): OmniModelConfig loads tokenizer/processor via the registered adapter.

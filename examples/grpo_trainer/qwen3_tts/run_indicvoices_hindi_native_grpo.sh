@@ -66,6 +66,37 @@ case "${RUN_STAGE}" in
         OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_BASE}/smoke-seed-${EXPERIMENT_SEED}}"
         ARGS=(--stage=smoke --total-steps=6 --learning-rate=5e-6 --warmup-steps=0 --resume)
         ;;
+    trace-lr0)
+        OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_BASE}/learning-trace-lr0-seed-${EXPERIMENT_SEED}}"
+        ARGS=(--stage=lr0 --total-steps=10 --learning-rate=0 --warmup-steps=0 --learning-trace)
+        ;;
+    trace-train)
+        OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_BASE}/learning-trace-seed-${EXPERIMENT_SEED}}"
+        ARGS=(
+            --stage=train
+            --total-steps=6
+            --learning-rate=5e-6
+            --warmup-steps=10
+            --eval-before-train
+            --save-validation-audio
+            --learning-trace
+            --learning-trace-audio
+        )
+        ;;
+    trace-resume)
+        OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_BASE}/learning-trace-seed-${EXPERIMENT_SEED}}"
+        ARGS=(
+            --stage=extend
+            --total-steps=7
+            --learning-rate=5e-6
+            --warmup-steps=10
+            --resume
+            --save-validation-audio
+            --learning-trace
+            --learning-trace-audio
+            --eval-after-train
+        )
+        ;;
     train)
         OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_BASE}/formal-seed-${EXPERIMENT_SEED}}"
         ARGS=(
@@ -89,7 +120,7 @@ case "${RUN_STAGE}" in
         )
         ;;
     *)
-        printf 'RUN_STAGE must be lr0, smoke, resume-smoke, train, or extend; got %s\n' "${RUN_STAGE}" >&2
+        printf 'Unknown RUN_STAGE: %s\n' "${RUN_STAGE}" >&2
         exit 2
         ;;
 esac

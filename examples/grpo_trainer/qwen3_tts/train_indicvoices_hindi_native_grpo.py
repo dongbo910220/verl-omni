@@ -16,6 +16,7 @@ import faulthandler
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import random
 import shutil
@@ -111,6 +112,54 @@ def rank_event(
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def _json_trace_value(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if torch.is_tensor(value):
+        value = value.detach().cpu()
+        return {
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": value.tolist(),
+        }
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_trace_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_trace_value(item) for item in value]
+    return value
+
+
+def learning_event(
+    args: argparse.Namespace,
+    runtime: Runtime,
+    event: str,
+    *,
+    step: int | None = None,
+    **values: Any,
+) -> None:
+    if not getattr(args, "learning_trace", False):
+        return
+    trace_dir = args.output_dir / "learning-trace"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "event": event,
+        "monotonic_s": time.monotonic(),
+        "rank": runtime.rank,
+        "step": step,
+        "time_s": time.time(),
+        **values,
+    }
+    with (trace_dir / f"rank-{runtime.rank}.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_json_trace_value(payload), ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n")
+
+
 def enable_hang_trace(args: argparse.Namespace, runtime: Runtime):
     trace_dir = args.output_dir / "hang-traces"
     trace_dir.mkdir(parents=True, exist_ok=True)
@@ -198,6 +247,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-validation-audio", action="store_true")
     parser.add_argument("--diagnose-prefill", action="store_true")
     parser.add_argument(
+        "--learning-trace",
+        action="store_true",
+        help="Write read-only, candidate-level JSONL evidence for teaching and audit.",
+    )
+    parser.add_argument(
+        "--learning-trace-audio",
+        action="store_true",
+        help="Save training candidate audio alongside --learning-trace events.",
+    )
+    parser.add_argument(
+        "--eval-after-train",
+        action="store_true",
+        help="Run the complete fixed-100 validation once after the shortened teaching run.",
+    )
+    parser.add_argument(
         "--hang-trace-interval-s",
         type=int,
         default=0,
@@ -220,6 +284,10 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("The eval stage requires --learning-rate 0.")
     if args.validation_seed_offset and not args.eval_only:
         raise ValueError("--validation-seed-offset is only valid with --eval-only.")
+    if args.learning_trace_audio and not args.learning_trace:
+        raise ValueError("--learning-trace-audio requires --learning-trace.")
+    if args.eval_after_train and args.stage not in ("train", "extend"):
+        raise ValueError("--eval-after-train is only valid for train or extend stages.")
     return args
 
 
@@ -368,10 +436,17 @@ def score_group(
     group: NativeRolloutGroup,
     args: argparse.Namespace,
     runtime: Runtime,
+    *,
+    step: int,
+    slot: int,
 ) -> NativeRolloutGroup:
+    if args.learning_trace_audio:
+        import soundfile as sf
+
     waveforms, sample_rate = decode_rollout_audio(wrapper.model, group.audio_codes)
     info = []
-    for waveform, has_eos in zip(waveforms, group.has_eos, strict=True):
+    audio_paths: list[str | None] = []
+    for candidate, (waveform, has_eos) in enumerate(zip(waveforms, group.has_eos, strict=True)):
         info.append(
             compute_score(
                 (waveform, sample_rate),
@@ -389,8 +464,39 @@ def score_group(
                 silence_rms_db=-40.0,
             )
         )
+        audio_path = None
+        if args.learning_trace_audio:
+            audio_dir = args.output_dir / "learning-trace" / "audio" / f"step-{step:04d}"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+            path = audio_dir / f"rank-{runtime.rank}-slot-{slot}-candidate-{candidate}.wav"
+            sf.write(path, waveform, sample_rate)
+            audio_path = str(path)
+        audio_paths.append(audio_path)
     group.rewards = np.asarray([item["score"] for item in info], dtype=np.float32)
     group.reward_info = info
+    if args.learning_trace:
+        learning_event(
+            args,
+            runtime,
+            "candidate_generation_and_reward",
+            step=step,
+            slot=slot,
+            text=group.text,
+            sample_rate=sample_rate,
+            candidates=[
+                {
+                    "candidate": candidate,
+                    "audio_path": audio_paths[candidate],
+                    "codec0_token_ids": group.codes[candidate][:, 0],
+                    "generation_frames": group.generation_lengths[candidate],
+                    "has_eos": group.has_eos[candidate],
+                    "rollout_logprobs": group.rollout_logprobs[candidate],
+                    "rollout_probabilities": group.rollout_logprobs[candidate].float().exp(),
+                    "reward": info[candidate],
+                }
+                for candidate in range(len(group.codes))
+            ],
+        )
     return group
 
 
@@ -406,6 +512,7 @@ def build_step_groups(
     sampler: PromptSampler,
     args: argparse.Namespace,
     runtime: Runtime,
+    step: int,
 ) -> tuple[dict[int, NativeRolloutGroup], dict[str, float]]:
     local_groups: dict[int, NativeRolloutGroup] = {}
     pending = list(range(args.prompts_per_step)) if runtime.primary else None
@@ -430,6 +537,17 @@ def build_step_groups(
             if slot % runtime.world_size != runtime.rank:
                 continue
             row = train_rows[int(assignment["prompt_index"])]
+            learning_event(
+                args,
+                runtime,
+                "prompt_assignment",
+                step=step,
+                prompt_id=row["id"],
+                prompt_index=int(assignment["prompt_index"]),
+                generation_seed=int(assignment["seed"]),
+                slot=slot,
+                text=row["text"],
+            )
             rollout_started = time.monotonic()
             rank_event(
                 args,
@@ -462,7 +580,7 @@ def build_step_groups(
                 slot=slot,
             )
             reward_started = time.monotonic()
-            group = score_group(wrapper, group, args, runtime)
+            group = score_group(wrapper, group, args, runtime, step=step, slot=slot)
             active = float(group.rewards.std(ddof=0)) >= args.zero_variance_epsilon
             rank_event(
                 args,
@@ -730,6 +848,19 @@ def train_step(
         group = groups[slot]
         advantages = group_advantages(group.rewards)
         token_count = sum(int(value.shape[0]) for value in group.codes)
+        learning_event(
+            args,
+            runtime,
+            "group_advantages",
+            step=step,
+            slot=slot,
+            rewards=group.rewards,
+            reward_mean=float(group.rewards.mean()),
+            reward_std=float(group.rewards.std(ddof=0)),
+            advantages=advantages,
+            trajectory_lengths=[int(value.shape[0]) for value in group.codes],
+            token_count=token_count,
+        )
         pg_value = 0.0
         kl_value = 0.0
         actor_values: list[torch.Tensor] = []
@@ -778,6 +909,20 @@ def train_step(
                         "slot": slot,
                         "token_ids": group.codes[candidate][:, 0],
                     }
+                )
+                learning_event(
+                    args,
+                    runtime,
+                    "trajectory_loss",
+                    step=step,
+                    slot=slot,
+                    candidate=candidate,
+                    advantage=float(advantages[candidate]),
+                    actor_logprobs=actor.detach(),
+                    reference_logprobs=reference,
+                    rollout_logprobs=group.rollout_logprobs[candidate],
+                    token_ids=group.codes[candidate][:, 0],
+                    **trajectory_metrics,
                 )
             torch.stack(losses).sum().backward()
             rank_event(args, runtime, "backward_done", candidates=candidates, slot=slot)
@@ -857,6 +1002,16 @@ def train_step(
         raise RuntimeError("Gradient norm is not finite.")
     optimizer.step()
     rank_event(args, runtime, "optimizer_step_done", grad_norm=grad_norm)
+    learning_event(
+        args,
+        runtime,
+        "optimizer_step",
+        step=step,
+        grad_norm=grad_norm,
+        gradient_tensors=gradient_tensors,
+        learning_rate=float(optimizer.param_groups[0]["lr"]),
+        consistency=consistency,
+    )
 
     local_summary = _mean_group_metrics(local_metrics)
     gathered: list[dict[str, float] | None] = [None] * runtime.world_size
@@ -867,9 +1022,9 @@ def train_step(
     return summary
 
 
-def _adapter_sha256(model) -> str:
+def _adapter_sha256(model, adapter_name: str = POLICY_ADAPTER) -> str:
     digest = hashlib.sha256()
-    state = get_peft_model_state_dict(model, adapter_name=POLICY_ADAPTER)
+    state = get_peft_model_state_dict(model, adapter_name=adapter_name)
     for key in sorted(state):
         digest.update(key.encode())
         digest.update(state[key].detach().float().cpu().contiguous().numpy().tobytes())
@@ -973,6 +1128,18 @@ def save_checkpoint(
             if adapter_dir.exists():
                 shutil.rmtree(adapter_dir)
             adapter_tmp.replace(adapter_dir)
+        learning_event(
+            args,
+            runtime,
+            "checkpoint_saved",
+            step=step,
+            archive=archive,
+            checkpoint_path=latest,
+            policy_sha256=payload["policy_sha256"],
+            sampler_cursor=int(payload["sampler"]["cursor"]),
+            sampler_epoch=int(payload["sampler"]["epoch"]),
+            optimizer_state_entries=len(payload["optimizer"].get("state", {})),
+        )
     dist.barrier()
 
 
@@ -1004,6 +1171,17 @@ def load_checkpoint(
     shared_step = _broadcast(runtime, step if runtime.primary else None)
     if step != shared_step:
         raise RuntimeError("Checkpoint step differs across ranks.")
+    learning_event(
+        args,
+        runtime,
+        "checkpoint_loaded",
+        step=step,
+        checkpoint_path=path,
+        policy_sha256=restored_hash,
+        sampler_cursor=int(payload["sampler"]["cursor"]),
+        sampler_epoch=int(payload["sampler"]["epoch"]),
+        optimizer_state_entries=len(payload["optimizer"].get("state", {})),
+    )
     return step
 
 
@@ -1016,6 +1194,7 @@ def evaluate(
 ) -> None:
     import soundfile as sf
 
+    learning_event(args, runtime, "validation_start", step=step, rows=len(rows))
     activate_adapter(wrapper.model, POLICY_ADAPTER)
     output_dir = args.output_dir / "validation" / f"step-{step:04d}"
     audio_dir = output_dir / "audio"
@@ -1095,6 +1274,14 @@ def evaluate(
             encoding="utf-8",
         )
         print("VALIDATION " + json.dumps(summary, ensure_ascii=False, sort_keys=True), flush=True)
+        learning_event(
+            args,
+            runtime,
+            "validation_complete",
+            step=step,
+            output_dir=output_dir,
+            summary=summary,
+        )
     dist.barrier()
 
 
@@ -1161,6 +1348,30 @@ def main() -> None:
             ]
         wrapper, parameters, versions = load_model(args, runtime)
         rank_event(args, runtime, "model_loaded")
+        if args.learning_trace:
+            trainable_names = [name for name, parameter in wrapper.model.named_parameters() if parameter.requires_grad]
+            dtype_counts: dict[str, int] = {}
+            for parameter in wrapper.model.parameters():
+                dtype = str(parameter.dtype)
+                dtype_counts[dtype] = dtype_counts.get(dtype, 0) + parameter.numel()
+            learning_event(
+                args,
+                runtime,
+                "model_and_lora_loaded",
+                base_model=args.model,
+                sft_adapter=args.sft_adapter,
+                whisper_model=args.whisper_model,
+                versions=versions,
+                active_adapters=getattr(wrapper.model, "active_adapters", None),
+                policy_adapter=POLICY_ADAPTER,
+                reference_adapter=REFERENCE_ADAPTER,
+                policy_sha256=_adapter_sha256(wrapper.model, POLICY_ADAPTER),
+                reference_sha256=_adapter_sha256(wrapper.model, REFERENCE_ADAPTER),
+                trainable_parameter_names=trainable_names,
+                trainable_parameters=sum(parameter.numel() for parameter in parameters),
+                trainable_tensors=len(parameters),
+                parameter_elements_by_dtype=dtype_counts,
+            )
         sampler = PromptSampler(len(train_rows), args.seed)
         optimizer = torch.optim.AdamW(
             parameters,
@@ -1188,7 +1399,7 @@ def main() -> None:
             started = time.monotonic()
             pre_update_hash = verified_rank_adapter_sha256(wrapper.model, args, runtime, f"step-{step + 1}-pre")
             rank_event(args, runtime, "step_start", step=step + 1)
-            groups, group_metrics = build_step_groups(wrapper, train_rows, sampler, args, runtime)
+            groups, group_metrics = build_step_groups(wrapper, train_rows, sampler, args, runtime, step + 1)
             lr = learning_rate_for_step(step, args.learning_rate, args.warmup_steps)
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
@@ -1216,10 +1427,19 @@ def main() -> None:
             if runtime.primary:
                 append_metrics(metrics_path, metrics)
                 print("TRAIN " + json.dumps(metrics, ensure_ascii=False, sort_keys=True), flush=True)
+            learning_event(
+                args,
+                runtime,
+                "step_complete",
+                step=step,
+                metrics=metrics,
+            )
             archive = step % args.save_every == 0 or step == args.total_steps
             save_checkpoint(wrapper, optimizer, sampler, step, args, runtime, archive=archive)
             if args.stage in ("train", "extend") and step % args.eval_every == 0:
                 evaluate(wrapper, validation_rows, step, args, runtime)
+        if args.eval_after_train:
+            evaluate(wrapper, validation_rows, step, args, runtime)
         if runtime.primary:
             print(f"Completed stage={args.stage} through step={step}.", flush=True)
     finally:

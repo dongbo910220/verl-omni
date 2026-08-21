@@ -341,9 +341,7 @@ def run_omni(config, task_runner_class=None) -> None:
             payload={
                 "backend": "verl_v1",
                 "task_runner": str(task_runner_class),
-                "task_runner_wrapper": (
-                    f"{type(task_runner_class).__module__}.{type(task_runner_class).__qualname__}"
-                ),
+                "task_runner_wrapper": (f"{type(task_runner_class).__module__}.{type(task_runner_class).__qualname__}"),
                 "trainer_mode": OmegaConf.select(config, "trainer.v1.trainer_mode"),
                 "transfer_queue": True,
             },

@@ -469,11 +469,9 @@ actor_rollout_ref:
     architecture: null
     model_stage: thinker
     hf_config_name: null
-    lora_dropout: 0.0
     lora_dtype: null
     lora_init_weights: gaussian
     target_parameters: null
-    reference_adapter_name: null
     policy_state_adapters:
     - default
     fsdp_layer_prefixes: []

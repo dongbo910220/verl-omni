@@ -57,64 +57,6 @@ def test_talker_batch_matches_auto_language_teacher_forcing_layout():
     assert batch.codec_lens == [3]
 
 
-def test_interleaved_batch_replays_trailer_stripped_generation_inputs_without_speaker():
-    hidden = 3
-
-    class Model(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.text_embedding = torch.nn.Embedding(1000, hidden)
-            self.codec_embedding = torch.nn.Embedding(5000, hidden)
-
-    class Predictor:
-        def __init__(self):
-            self.embeddings = torch.nn.ModuleList(torch.nn.Embedding(128, hidden) for _ in range(15))
-
-        def get_input_embeddings(self):
-            return self.embeddings
-
-    talker = SimpleNamespace(model=Model(), text_projection=None, code_predictor=Predictor())
-    with torch.no_grad():
-        talker.model.text_embedding.weight.copy_(
-            torch.arange(1000 * hidden, dtype=torch.float32).reshape(1000, hidden) / 1000
-        )
-        talker.model.codec_embedding.weight.copy_(
-            torch.arange(5000 * hidden, dtype=torch.float32).reshape(5000, hidden) / 5000
-        )
-        for index, embedding in enumerate(talker.code_predictor.embeddings):
-            embedding.weight.fill_(index + 1)
-
-    # The agent loop has already removed the five-token assistant trailer.
-    text_ids = torch.tensor([1, 2, 3, 4, 5])
-    codes = torch.zeros((4, 16), dtype=torch.long)
-    codes[:, 0] = torch.tensor([10, 11, 12, TOKENS.codec_eos])
-    codes[:, 1:] = torch.arange(15).reshape(1, -1)
-
-    batch = forward.build_interleaved_talker_batch(talker, [text_ids], [codes], TOKENS)
-
-    text = talker.model.text_embedding
-    codec = talker.model.codec_embedding
-    assert batch.inputs_embeds.shape == (1, 11, hidden)
-    assert batch.logit_start == [7]
-    assert batch.codec_lens == [4]
-    torch.testing.assert_close(batch.inputs_embeds[0, :3], text(text_ids[:3]))
-    torch.testing.assert_close(
-        batch.inputs_embeds[0, 3:7],
-        torch.cat((text(torch.tensor([TOKENS.tts_pad] * 3)), text(torch.tensor([TOKENS.tts_bos]))))
-        + codec(torch.tensor([TOKENS.codec_nothink, TOKENS.codec_think_bos, TOKENS.codec_think_eos, TOKENS.codec_pad])),
-    )
-    torch.testing.assert_close(batch.inputs_embeds[0, 7], text(text_ids[3]) + codec(torch.tensor(TOKENS.codec_bos)))
-
-    residual_sum = sum(range(1, 16))
-    torch.testing.assert_close(batch.inputs_embeds[0, 8], text(text_ids[4]) + codec(codes[0, 0]) + residual_sum)
-    torch.testing.assert_close(
-        batch.inputs_embeds[0, 9], text(torch.tensor(TOKENS.tts_eos)) + codec(codes[1, 0]) + residual_sum
-    )
-    torch.testing.assert_close(
-        batch.inputs_embeds[0, 10], text(torch.tensor(TOKENS.tts_pad)) + codec(codes[2, 0]) + residual_sum
-    )
-
-
 def test_only_validated_auto_language_layout_is_accepted():
     assert forward.require_auto_language("auto") == "Auto"
     with pytest.raises(ValueError, match="supports only tts_language=Auto"):
@@ -168,58 +110,6 @@ def test_actor_logits_align_to_effective_codec0_response(monkeypatch):
 
     assert torch.nonzero(logits.abs().sum(dim=-1)[0], as_tuple=False).reshape(-1).tolist() == [5, 6, 7]
     torch.testing.assert_close(logits[0, 5], torch.arange(1, 4301, dtype=torch.float32))
-
-
-def test_actor_logits_dispatches_interleaved_replay_without_speaker(monkeypatch):
-    class CodePredictor:
-        @staticmethod
-        def get_input_embeddings():
-            return [torch.nn.Embedding(2048, 4)]
-
-    talker = SimpleNamespace(code_predictor=CodePredictor())
-    model = SimpleNamespace(
-        talker=talker,
-        config=SimpleNamespace(
-            tts_replay_layout="interleaved",
-            tts_pad_token_id=TOKENS.tts_pad,
-            tts_bos_token_id=TOKENS.tts_bos,
-            tts_eos_token_id=TOKENS.tts_eos,
-            talker_config=SimpleNamespace(
-                codec_pad_id=TOKENS.codec_pad,
-                codec_bos_id=TOKENS.codec_bos,
-                codec_eos_token_id=TOKENS.codec_eos,
-                codec_nothink_id=TOKENS.codec_nothink,
-                codec_think_bos_id=TOKENS.codec_think_bos,
-                codec_think_eos_id=TOKENS.codec_think_eos,
-            ),
-        ),
-    )
-    fake_batch = forward.InterleavedTalkerBatch(torch.zeros((1, 5, 4)), torch.ones((1, 5), dtype=torch.long), [3], [2])
-    seen = {}
-
-    def fake_build(*args, **kwargs):
-        seen["speaker"] = kwargs["speaker_embedding"]
-        return fake_batch
-
-    monkeypatch.setattr(forward, "build_interleaved_talker_batch", fake_build)
-    monkeypatch.setattr(forward, "interleaved_codec0_logits", lambda *_: torch.ones((1, 5, 4300)))
-    input_ids = torch.tensor([[0, 0, 0, 10, 11, 12]])
-    codes = torch.zeros((1, 3, 16), dtype=torch.long)
-    codes[0, :, 0] = input_ids[0, -3:]
-
-    logits = forward.tts_actor_logits(
-        model,
-        input_ids,
-        torch.ones_like(input_ids),
-        torch.arange(10).reshape(1, -1),
-        codes,
-        torch.tensor([3]),
-        torch.tensor([10]),
-        None,
-    )
-
-    assert seen["speaker"] is None
-    assert torch.nonzero(logits.abs().sum(dim=-1)[0], as_tuple=False).reshape(-1).tolist() == [2, 3, 4]
 
 
 @pytest.mark.parametrize("response_length", [2, 14, 15, 16, 17, 32])

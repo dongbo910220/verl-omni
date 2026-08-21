@@ -632,11 +632,6 @@ class OmniModelBase(ABC):
         """Add architecture-specific tensors to an omni-model forward call."""
         return model_inputs
 
-    @classmethod
-    def prepare_logprob_output_args(cls, output_args: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
-        """Adjust framework log-probability arguments for a model's policy contract."""
-        return output_args
-
 
 class OmniRolloutPipelineBase:
     """Registry for omni model vLLM-Omni pipeline topologies.

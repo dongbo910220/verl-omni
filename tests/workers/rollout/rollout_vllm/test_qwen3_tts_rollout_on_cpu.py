@@ -56,22 +56,15 @@ def test_rollout_adapter_builds_unique_prompt_and_scopes_weight_sync(tmp_path):
     assert Qwen3TTSRolloutAdapter.get_output_modalities("full") == ["latent", "audio"]
 
 
-def test_rollout_adapter_builds_exact_streaming_no_speaker_prompt():
+def test_rollout_adapter_requires_speaker_embedding():
     model_config = SimpleNamespace(
         tokenizer=_Tokenizer(),
-        override_config={"tts_replay_layout": "interleaved", "tts_language": "Auto"},
+        override_config={"tts_language": "Auto"},
         hf_config=SimpleNamespace(talker_config=SimpleNamespace(codec_eos_token_id=2150)),
     )
 
-    prompt = Qwen3TTSRolloutAdapter.prepare_engine_prompt([1], model_config, {})
-
-    assert len(prompt["prompt_token_ids"]) == 8
-    assert prompt["additional_information"] == {
-        "task_type": ["VoiceDesign"],
-        "text": ["first text"],
-        "language": ["Auto"],
-        "non_streaming_mode": [False],
-    }
+    with pytest.raises(ValueError, match="requires tts_spk_embed_path"):
+        Qwen3TTSRolloutAdapter.prepare_engine_prompt([1], model_config, {})
 
 
 def test_talker_adapter_pads_exact_rollout_fields_for_actor_forward():
@@ -99,29 +92,6 @@ def test_talker_adapter_requires_v1_agent_loop_extra_fields():
         Qwen3TTSTalkerAdapter.prepare_model_inputs(model_inputs, {}, None)
 
 
-def test_talker_adapter_neutralizes_temperature_for_raw_policy_logprobs():
-    output_args = {
-        "temperature": torch.tensor([0.9, 0.8]),
-        "temperature_rmpad": torch.tensor([0.9, 0.9, 0.8]),
-        "other": True,
-    }
-    model_config = SimpleNamespace(override_config={"tts_policy_logprobs_mode": "raw_logprobs"})
-
-    prepared = Qwen3TTSTalkerAdapter.prepare_logprob_output_args(output_args, None, model_config)
-
-    torch.testing.assert_close(prepared["temperature"], torch.ones(2))
-    torch.testing.assert_close(prepared["temperature_rmpad"], torch.ones(3))
-    assert prepared["other"] is True
-    torch.testing.assert_close(output_args["temperature"], torch.tensor([0.9, 0.8]))
-
-
-def test_talker_adapter_rejects_unknown_policy_logprobs_mode():
-    model_config = SimpleNamespace(override_config={"tts_policy_logprobs_mode": "raw_logits"})
-
-    with pytest.raises(ValueError, match="Unsupported Qwen3-TTS policy logprobs mode"):
-        Qwen3TTSTalkerAdapter.prepare_logprob_output_args({}, None, model_config)
-
-
 def test_rollout_adapter_combines_policy_codes_and_waveform():
     token_ids = [101, 102, 2150]
     generated = torch.arange(3 * 16, dtype=torch.long).reshape(3, 16) + 1
@@ -142,12 +112,9 @@ def test_rollout_adapter_combines_policy_codes_and_waveform():
 
     assert selected is policy
     torch.testing.assert_close(fields["tts_audio_codes"], generated.long())
-    torch.testing.assert_close(fields["tts_audio"], torch.ones(2400))
-    assert fields["tts_audio_sample_rate"] == 24_000
+    torch.testing.assert_close(fields["audio"], torch.ones(2400))
+    assert fields["audio_sample_rate"] == 24_000
     assert fields["tts_text"] == "first text"
-    assert fields["tts_codec_eos_token_id"] == 2150
-    assert fields["tts_generation_length"] == 3
-    assert fields["tts_has_eos"] is True
 
 
 def test_bucketed_weight_sync_rebuilds_derived_codec_table_once(monkeypatch):
@@ -246,7 +213,7 @@ async def test_server_retains_requested_stage_outputs_and_targets_weight_sync():
         @staticmethod
         def combine_engine_outputs(outputs, prompt):
             assert outputs == [policy]
-            return policy, {"tts_audio_sample_rate": 24_000}
+            return policy, {"audio_sample_rate": 24_000}
 
     server = object.__new__(vLLMOmniHttpServer)
     server._ar_mode = True
@@ -259,7 +226,7 @@ async def test_server_retains_requested_stage_outputs_and_targets_weight_sync():
     rpc_result = await server.collective_rpc("update_weights_from_ipc", kwargs={"base_sync_done": True})
 
     assert result is policy
-    assert result._verl_omni_rollout_fields == {"tts_audio_sample_rate": 24_000}
+    assert result._verl_omni_rollout_fields == {"audio_sample_rate": 24_000}
     assert server.engine.generate_kwargs["output_modalities"] == ["latent", "audio"]
     assert server.engine.rpc_kwargs["stage_ids"] == [0]
     assert rpc_result == "rpc-result"

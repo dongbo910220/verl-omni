@@ -744,7 +744,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 ]
 
             finish_reason = req_output.outputs[0].finish_reason
-            extra_fields["finish_reason"] = finish_reason
             stop_reason = self._map_stop_reason(finish_reason)
 
             num_preempted = None

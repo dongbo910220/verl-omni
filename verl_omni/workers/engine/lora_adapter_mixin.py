@@ -15,7 +15,6 @@
 
 import logging
 from contextlib import contextmanager, nullcontext
-from pathlib import Path
 
 import torch
 from peft import LoraConfig
@@ -24,100 +23,28 @@ from verl.utils.py_functional import convert_to_regular_types
 logger = logging.getLogger(__name__)
 
 
-def _normalize_checkpoint_keys(state_dict, expected_keys):
-    if set(state_dict) == expected_keys:
-        return state_dict
-    prefix = "base_model.model."
-    normalized = {key[len(prefix) :] if key.startswith(prefix) else key: value for key, value in state_dict.items()}
-    if len(normalized) == len(state_dict) and set(normalized) == expected_keys:
-        return normalized
-    missing = sorted(expected_keys - set(normalized))
-    unexpected = sorted(set(normalized) - expected_keys)
-    raise RuntimeError(
-        "LoRA checkpoint does not exactly match the injected adapter: "
-        f"missing={missing[:5]} ({len(missing)} total), "
-        f"unexpected={unexpected[:5]} ({len(unexpected)} total)."
-    )
-
-
-def _load_lora_checkpoint(
-    module,
-    adapter_path: str,
-    adapter_name: str,
-    *,
-    lora_dropout: float | None = None,
-) -> None:
-    """Inject and exactly load a local PEFT adapter into any compatible model."""
-    from peft import LoraConfig, get_peft_model_state_dict, set_peft_model_state_dict
-    from safetensors.torch import load_file
-
-    adapter_path = Path(adapter_path)
-    config_path = adapter_path / "adapter_config.json"
-    weights_path = adapter_path / "adapter_model.safetensors"
-    if not config_path.is_file() or not weights_path.is_file():
-        raise FileNotFoundError(f"PEFT adapter requires {config_path} and {weights_path}.")
-
-    config = LoraConfig.from_pretrained(adapter_path)
-    if lora_dropout is not None:
-        config.lora_dropout = float(lora_dropout)
-    module.add_adapter(config, adapter_name=adapter_name)
-    current = get_peft_model_state_dict(module, adapter_name=adapter_name)
-    checkpoint = _normalize_checkpoint_keys(load_file(weights_path), set(current))
-    set_peft_model_state_dict(module, checkpoint, adapter_name=adapter_name)
-
-    loaded = get_peft_model_state_dict(module, adapter_name=adapter_name)
-    mismatched = [
-        key
-        for key in current
-        if not torch.equal(loaded[key].detach().cpu(), checkpoint[key].to(dtype=loaded[key].dtype).cpu())
-    ]
-    if mismatched:
-        raise RuntimeError(f"LoRA checkpoint verification failed for {len(mismatched)} tensors: {mismatched[:5]}.")
-
-
 class LoRAAdapterMixin:
     """Backend-agnostic helpers for named PEFT/LoRA policy adapters."""
 
     def _build_lora_module(self, module):
         lora_adapter_path = getattr(self.model_config, "lora_adapter_path", None)
-        reference_adapter_name = getattr(self.model_config, "reference_adapter_name", None)
         policy_state_adapters = tuple(getattr(self.model_config, "policy_state_adapters", ("default",)))
-        lora_dropout = getattr(self.model_config, "lora_dropout", None)
-        extra_adapters = [adapter for adapter in policy_state_adapters if adapter not in ("default", "reference")]
-        if reference_adapter_name is not None:
-            if reference_adapter_name in ("default", "reference"):
-                raise ValueError("reference_adapter_name must be a distinct registered PEFT adapter name.")
-            if lora_adapter_path is None:
-                raise ValueError("reference_adapter_name requires lora_adapter_path to snapshot a pretrained policy.")
-            if reference_adapter_name not in extra_adapters:
-                extra_adapters.append(reference_adapter_name)
-
+        extra_adapters = tuple(adapter for adapter in policy_state_adapters if adapter not in ("default", "reference"))
         if lora_adapter_path is not None:
             from verl.utils.fs import copy_to_local
 
-            print(f"Loading pre-trained LoRA adapter from: {lora_adapter_path}")
+            print(f"Loading pre-trained LoRA adapter to from: {lora_adapter_path}")
             local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.model_config.use_shm)
 
-            if reference_adapter_name is None:
-                # Preserve the existing loader for ordinary continued-LoRA training.
-                module.load_lora_adapter(local_adapter_path)
-            else:
-                # A frozen SFT reference must start byte-for-byte from the same
-                # checkpoint as the trainable policy, so load both explicitly.
-                _load_lora_checkpoint(module, local_adapter_path, "default", lora_dropout=lora_dropout)
+            module.load_lora_adapter(local_adapter_path)
             peft_config = getattr(module, "peft_config", {}).get("default", None)
             for adapter_name in extra_adapters:
-                if adapter_name in getattr(module, "peft_config", {}):
-                    continue
-                if adapter_name == reference_adapter_name:
-                    _load_lora_checkpoint(module, local_adapter_path, adapter_name, lora_dropout=lora_dropout)
-                elif peft_config is not None:
+                if peft_config is not None and adapter_name not in getattr(module, "peft_config", {}):
                     module.add_adapter(peft_config, adapter_name=adapter_name)
         else:
             lora_config = {
                 "r": self.model_config.lora_rank,
                 "lora_alpha": self.model_config.lora_alpha,
-                "lora_dropout": getattr(self.model_config, "lora_dropout", 0.0),
                 "init_lora_weights": self.model_config.lora_init_weights,
                 "target_modules": convert_to_regular_types(self.model_config.target_modules),
                 "target_parameters": convert_to_regular_types(self.model_config.target_parameters),
@@ -197,17 +124,6 @@ class LoRAAdapterMixin:
                 yield
             finally:
                 self._set_adapter("default")
-
-    @contextmanager
-    def use_reference_adapter(self):
-        """Use the configured frozen reference, or the base model when unset."""
-        name = getattr(self.model_config, "reference_adapter_name", None)
-        if name is None:
-            with self.disable_adapter():
-                yield
-        else:
-            with self.use_adapter(name):
-                yield
 
     def _active_adapter_trainable_params(self, adapter_name: str) -> list[torch.nn.Parameter]:
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)

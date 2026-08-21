@@ -55,26 +55,6 @@ class Qwen3TTSSingleTurnAgentLoop(SingleTurnAgentLoop):
         text_ids = self.tokenizer(build_assistant_text(str(text)), return_tensors="pt", padding=False)["input_ids"]
         extra["tts_text_ids"] = text_ids[:, :-TEXT_PROMPT_TRAILER_TOKENS].reshape(-1).tolist()
         extra["tts_audio_codes"] = codes
-        codec_eos_token_id = int(extra["tts_codec_eos_token_id"])
-        finish_reason = str(extra.get("finish_reason") or "")
-        response_length = len(policy_ids)
-        generated_eos = policy_ids[-1] == codec_eos_token_id
-        hit_cap = finish_reason == "length" or response_length >= self.response_length
-        extra.update(
-            {
-                "response_length": response_length,
-                "max_response_length": int(self.response_length),
-                "generated_eos": generated_eos,
-                "hit_cap": hit_cap,
-                "truncated": hit_cap and not generated_eos,
-                "terminal_codec_token_id": int(policy_ids[-1]),
-                "codec_eos_token_id": codec_eos_token_id,
-                "termination_consistent": (
-                    (finish_reason == "stop" and generated_eos)
-                    or (finish_reason == "length" and hit_cap and not generated_eos)
-                ),
-            }
-        )
         output.prompt_ids = [0]
         output.response_ids = policy_ids
         output.response_mask = [1] * len(policy_ids)

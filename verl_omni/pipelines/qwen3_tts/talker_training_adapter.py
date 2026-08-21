@@ -25,6 +25,7 @@ from verl_omni.pipelines.qwen3_tts.talker_forward import (
     require_auto_language,
     tts_actor_logits,
 )
+from verl_omni.pipelines.qwen3_tts.transformers_compat import qwen3_tts_import_context
 
 logger = logging.getLogger(__name__)
 _PASSTHROUGH_TEMPLATE = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
@@ -40,24 +41,25 @@ def _prepare_config_for_checkpoint(config) -> None:
 
 def register_qwen3_tts_automodel() -> None:
     config_cls = model_cls = None
-    for module_name in ("transformers", "qwen_tts.core.models.configuration_qwen3_tts"):
-        try:
-            config_cls = getattr(__import__(module_name, fromlist=["Qwen3TTSConfig"]), "Qwen3TTSConfig", None)
-        except ImportError:
-            continue
-        if config_cls is not None:
-            break
-    for module_name in ("transformers", "qwen_tts.core.models.modeling_qwen3_tts"):
-        try:
-            model_cls = getattr(
-                __import__(module_name, fromlist=["Qwen3TTSForConditionalGeneration"]),
-                "Qwen3TTSForConditionalGeneration",
-                None,
-            )
-        except ImportError:
-            continue
-        if model_cls is not None:
-            break
+    with qwen3_tts_import_context():
+        for module_name in ("transformers", "qwen_tts.core.models.configuration_qwen3_tts"):
+            try:
+                config_cls = getattr(__import__(module_name, fromlist=["Qwen3TTSConfig"]), "Qwen3TTSConfig", None)
+            except ImportError:
+                continue
+            if config_cls is not None:
+                break
+        for module_name in ("transformers", "qwen_tts.core.models.modeling_qwen3_tts"):
+            try:
+                model_cls = getattr(
+                    __import__(module_name, fromlist=["Qwen3TTSForConditionalGeneration"]),
+                    "Qwen3TTSForConditionalGeneration",
+                    None,
+                )
+            except ImportError:
+                continue
+            if model_cls is not None:
+                break
     if config_cls is None or model_cls is None:
         return
 
@@ -151,12 +153,8 @@ class Qwen3TTSTalkerAdapter(OmniModelBase):
         _prepare_config_for_checkpoint(module.config)
         module.config.tts_spk_embed_path = model_config.override_config.get("tts_spk_embed_path")
         module.config.tts_language = require_auto_language(model_config.override_config.get("tts_language", "Auto"))
-        replay_layout = str(model_config.override_config.get("tts_replay_layout", "concatenated"))
-        if replay_layout not in ("concatenated", "interleaved"):
-            raise ValueError("tts_replay_layout must be 'concatenated' or 'interleaved'.")
-        if replay_layout == "concatenated" and not module.config.tts_spk_embed_path:
-            raise ValueError("Concatenated Qwen3-TTS replay requires tts_spk_embed_path.")
-        module.config.tts_replay_layout = replay_layout
+        if not module.config.tts_spk_embed_path:
+            raise ValueError("Qwen3-TTS GRPO requires tts_spk_embed_path for the validated non-streaming replay.")
         module.forward = types.MethodType(_qwen3_tts_forward, module)
         module.get_input_embeddings = types.MethodType(_get_input_embeddings, module)
         module.set_input_embeddings = types.MethodType(_set_input_embeddings, module)
@@ -225,25 +223,6 @@ class Qwen3TTSTalkerAdapter(OmniModelBase):
             }
         )
         return model_inputs
-
-    @classmethod
-    def prepare_logprob_output_args(cls, output_args, micro_batch, model_config):
-        del micro_batch
-        mode = str(model_config.override_config.get("tts_policy_logprobs_mode", "processed_logprobs"))
-        if mode == "processed_logprobs":
-            return output_args
-        if mode != "raw_logprobs":
-            raise ValueError(f"Unsupported Qwen3-TTS policy logprobs mode: {mode!r}.")
-
-        # Base verl divides actor logits by the rollout sampling temperature.
-        # Raw vLLM/MLX logprobs are computed before that transformation.
-        output_args = dict(output_args)
-        for key in ("temperature", "temperature_rmpad"):
-            if key not in output_args:
-                continue
-            value = output_args[key]
-            output_args[key] = torch.ones_like(value) if torch.is_tensor(value) else 1.0
-        return output_args
 
 
 register_qwen3_tts_automodel()

@@ -95,7 +95,10 @@ bash examples/grpo_trainer/qwen3_tts/run_qwen3_tts_grpo.sh
 The example defaults are `B=4`, `G=8`, `lr=2e-7`, direct `low_var_kl` with
 coefficient `0.12`, two GPUs, and 500 updates. These are recipe values, not
 algorithm requirements. `norm_adv_by_std_in_grpo` remains at the upstream
-default.
+default. Actor, reference, rollout, and weight synchronization all use FP32:
+the codec policy sums 16 codebook embeddings autoregressively, so a nominal
+FP32 rollout with BF16 FSDP forward or BF16 synchronization does not reproduce
+the same selected-token probabilities.
 
 For a two-update implementation smoke test:
 

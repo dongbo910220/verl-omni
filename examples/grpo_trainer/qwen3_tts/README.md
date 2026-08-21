@@ -1,5 +1,7 @@
 # Qwen3-TTS GRPO with an audio reward
 
+Last updated: 08/21/2026.
+
 This example full-parameter tunes the codec-0 policy of
 `Qwen/Qwen3-TTS-12Hz-0.6B-Base`. It uses verl's stock GRPO advantage,
 vanilla PPO policy loss, and optional direct reference-model KL. The other

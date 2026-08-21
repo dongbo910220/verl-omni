@@ -23,6 +23,7 @@ pytest.importorskip("vllm_omni")
 
 from vllm import SamplingParams
 
+from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_tts import omni_rollout_adapter
 from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
 from verl_omni.pipelines.qwen3_tts.talker_training_adapter import Qwen3TTSTalkerAdapter
@@ -40,6 +41,17 @@ class _Tokenizer:
 
     def __call__(self, text, **kwargs):
         return {"input_ids": list(range(len(text)))}
+
+
+def test_optional_rollout_hooks_preserve_existing_ar_defaults():
+    first, final = object(), object()
+
+    assert OmniRolloutPipelineBase.weight_sync_stage_ids() is None
+    assert OmniRolloutPipelineBase.supports_cache_engine_sleep()
+    assert OmniRolloutPipelineBase.get_worker_extension_cls() is None
+    assert OmniRolloutPipelineBase.prepare_engine_prompt([], None, {}) is None
+    assert OmniRolloutPipelineBase.get_output_modalities() is None
+    assert OmniRolloutPipelineBase.combine_engine_outputs([first, final], {}) == (final, {})
 
 
 def test_rollout_pipeline_registers_upstream_talker(monkeypatch):

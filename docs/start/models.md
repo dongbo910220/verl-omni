@@ -181,6 +181,21 @@ rather than a separate per-stage YAML file.
 
 ---
 
+### Qwen3-TTS-12Hz-0.6B Base
+
+| Property | Detail |
+|----------|--------|
+| **Hugging Face ID** | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` |
+| **Trainable component** | Talker codec-0 policy, full-parameter example |
+| **Rollout** | Two-stage vLLM-Omni Talker + code2wav pipeline |
+| **Algorithm** | Stock GRPO, vanilla PPO loss, optional direct KL |
+| **Reward** | Generic decoded-audio reward; SpeechJudge-BTRM external scorer example |
+
+The example uses two training GPUs and an independently deployed audio scorer.
+See [Qwen3-TTS GRPO with an audio reward](../../examples/grpo_trainer/qwen3_tts/README.md).
+
+---
+
 ## Model Architecture Summary
 
 | Model | Architecture | Text encoder |
@@ -202,7 +217,8 @@ rather than a separate per-stage YAML file.
 | Qwen2.5-VL-3B-Instruct | `Qwen/Qwen2.5-VL-3B-Instruct` | Vision-Language | SD3.5 (Flow-GRPO) | vLLM, TP=1, dedicated pool |
 | PickScore | `yuvalkirstain/PickScore_v1` | Vision (preference) | Qwen-Image-Edit (Flow-GRPO), BAGEL (PickScore recipe) | Local CLIP load, async workers |
 | HPSv3 | Local `.safetensors` | Vision (aesthetic) | Wan2.2 (DanceGRPO) | Local safetensors load |
-| HTTP scorer | External HTTP service | Any | Any model | Gunicorn/Flask, pickle protocol |
+| HTTP scorer | External HTTP service | Image/audio | Any model | Pickle image or JSON audio protocol |
+| SpeechJudge-BTRM | `RMSnow/SpeechJudge-BTRM` | Audio quality | Qwen3-TTS example | External service; CC-BY-NC-4.0 |
 | JPEG incompressibility | Rule-based | Image stats | Any diffusion model | No model process needed |
 
 For end-to-end instructions on setting up each reward, see the respective

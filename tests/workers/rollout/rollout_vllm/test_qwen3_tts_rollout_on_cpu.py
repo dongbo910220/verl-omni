@@ -23,7 +23,7 @@ pytest.importorskip("vllm_omni")
 
 from vllm import SamplingParams
 
-from verl_omni.pipelines.qwen3_tts import omni_rollout_adapter
+from verl_omni.pipelines.qwen3_tts import omni_rollout_adapter, vllm_plugin
 from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
 from verl_omni.pipelines.qwen3_tts.rollout_model import _align_prompt_embedding_dtype
 from verl_omni.pipelines.qwen3_tts.talker_training_adapter import Qwen3TTSTalkerAdapter
@@ -43,7 +43,7 @@ def test_rollout_pipeline_registers_dtype_aligned_talker(monkeypatch):
     registered_models = []
     registered_pipelines = []
     monkeypatch.setattr(
-        omni_rollout_adapter.ModelRegistry,
+        vllm_plugin.ModelRegistry,
         "register_model",
         lambda architecture, model_class: registered_models.append((architecture, model_class)),
     )

@@ -92,6 +92,14 @@ def test_tensor_and_parameter_evidence_is_bounded_and_detects_update():
     assert after["local_gradient_l2"] > 0
 
 
+def test_tensor_sampling_uses_exact_integer_indices_for_large_parameters():
+    # float32 linspace rounds 18_743_295 up to 18_743_296 and produces an invalid final index.
+    tensor = torch.zeros(18_743_296, dtype=torch.uint8)
+    tensor[-1] = 1
+    sampled = learning_trace._sample_flat_tensor(tensor, 8)
+    assert sampled.tolist() == [0, 0, 0, 0, 0, 0, 0, 1]
+
+
 def test_weight_iterator_preserves_order_and_writes_summary(tmp_path, monkeypatch):
     monkeypatch.setenv(learning_trace.TRACE_DIR_ENV, str(tmp_path))
     monkeypatch.setenv(learning_trace.TRACE_RUN_ID_ENV, "run-1")

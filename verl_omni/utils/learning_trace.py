@@ -147,7 +147,10 @@ def _sample_flat_tensor(tensor, limit: int):
     tensor = _local_tensor(tensor).detach().reshape(-1)
     if tensor.numel() <= limit:
         return tensor
-    indices = torch.linspace(0, tensor.numel() - 1, steps=limit, device=tensor.device).long()
+    if limit == 1:
+        return tensor[:1]
+    positions = torch.arange(limit, dtype=torch.int64, device=tensor.device)
+    indices = torch.div(positions * (tensor.numel() - 1), limit - 1, rounding_mode="floor")
     return tensor.index_select(0, indices)
 
 

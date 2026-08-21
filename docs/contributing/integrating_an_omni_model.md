@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 07/28/2026.
+Last updated: 08/21/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
@@ -13,10 +13,10 @@ under [`verl_omni/pipelines/`](https://github.com/verl-project/verl-omni/tree/ma
 Decide which **training stage** you want to train and how the model decomposes:
 
 - **Stage-split**: Multi-component omni models (thinker → talker → code2wav)
-  train only the text-understanding head during RL post-training. Other
-  components are stripped before FSDP wrapping to save memory. This is the
-  Qwen3-Omni pattern — the thinker is the autoregressive language model; talker
-  and codec are inference-only.
+  train one selected autoregressive stage during RL post-training. Other
+  components are stripped before FSDP wrapping to save memory. Qwen3-Omni
+  trains the thinker; Qwen3-TTS trains the talker's codec-0 policy while its
+  decoder remains rollout-only.
 - **Encoder-frozen**: Vision/audio encoders are typically frozen during RL
   training (`freeze_vision_tower=True`). The training adapter's
   `get_strip_modules` excludes them from the trainable set if they are separate
@@ -60,6 +60,12 @@ adapt each implementation to your model's architecture:
   `module._no_split_modules` to the correct decoder layer class for FSDP.
   This method runs before FSDP wrapping and LoRA injection.
 
+- **`prepare_model_inputs(model_inputs, micro_batch, model_config)`**
+  (optional): Add tensors retained by the rollout to the actor's forward call.
+  This is needed when the policy sequence alone cannot reconstruct the exact
+  teacher-forced inputs. Qwen3-TTS uses it to pass text tokens and all 16 codec
+  codebooks while optimizing codec-0 log-probabilities.
+
 Reference:
 [`verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py`](../../verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py)
 
@@ -82,10 +88,21 @@ and implement:
 - **`get_pipeline_id(pipeline_mode)`**: Return the vLLM-Omni pipeline
   `model_type` string, used when auto-generating the deploy config YAML.
 
-Optional overrides: `ensure_pipeline_registered` (register non-standard
-pipeline variants with vLLM-Omni), `get_engine_hf_overrides` (HF config
-overrides like `enable_audio_output: false`), `get_stage_engine_extras`
-(per-stage overrides like `model_arch`).
+Optional overrides fall into four groups:
+
+- Pipeline setup: `ensure_pipeline_registered`, `get_engine_hf_overrides`,
+  `get_stage_engine_extras`, `get_worker_extension_cls`, and
+  `initialize_rollout_workers`.
+- Resource behavior: `weight_sync_stage_ids` and
+  `supports_cache_engine_sleep`.
+- Request construction: `prepare_engine_prompt`.
+- Multi-stage output retention: `get_output_modalities` and
+  `combine_engine_outputs`.
+
+Their defaults preserve the existing single-output AR behavior. Override only
+the hooks required by the model. For example, Qwen3-TTS synchronizes actor
+weights only to its talker stage and retains both codec and waveform outputs;
+the decoder stage never receives actor weights.
 
 Reference:
 [`verl_omni/pipelines/qwen3_omni/omni_rollout_adapter.py`](../../verl_omni/pipelines/qwen3_omni/omni_rollout_adapter.py)
@@ -149,6 +166,9 @@ Key points:
 Reference:
 [`examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`](../../examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh)
 
+For a talker-stage full-parameter example, see
+[`examples/grpo_trainer/qwen3_tts/run_qwen3_tts_grpo.sh`](../../examples/grpo_trainer/qwen3_tts/run_qwen3_tts_grpo.sh).
+
 ## 6. Common pitfalls
 
 These pitfalls are drawn from the Qwen3-Omni adapter. Some are
@@ -176,3 +196,9 @@ model-specific — verify each against your own model's architecture.
   in `configure_tokenizer` and assign it to `tokenizer.chat_template`.
   verl's dataset loader calls `tokenizer.apply_chat_template()` and will
   fail without a template.
+
+- **Actor/rollout probability consistency**: Autoregressive codec policies may
+  combine several codebook embeddings before predicting the selected token.
+  Match actor, reference, rollout, and weight-sync dtypes, then verify selected
+  token log-probabilities before training. A nominal FP32 rollout fed BF16
+  actor weights is not an FP32 consistency check.

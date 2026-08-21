@@ -20,6 +20,7 @@ from dataclasses import replace
 from functools import lru_cache
 
 import torch
+from vllm.model_executor.models import ModelRegistry
 from vllm_omni.config.pipeline_registry import register_pipeline
 from vllm_omni.config.stage_config import PipelineConfig
 from vllm_omni.model_executor.models.qwen3_tts.pipeline import QWEN3_TTS_PIPELINE
@@ -33,10 +34,12 @@ from verl_omni.pipelines.qwen3_tts.talker_forward import (
 )
 
 _PIPELINE_ID = "qwen3_tts_rl"
+_ROLLOUT_MODEL_ARCH = "Qwen3TTSDtypeAlignedTalkerForConditionalGeneration"
+_ROLLOUT_MODEL_CLASS = "verl_omni.pipelines.qwen3_tts.rollout_model:Qwen3TTSDtypeAlignedTalkerForConditionalGeneration"
 _SYNC_PROCESSOR = "verl_omni.pipelines.qwen3_tts.omni_rollout_adapter.talker2code2wav_token_only"
 QWEN3_TTS_RL_PIPELINE = PipelineConfig(
     model_type=_PIPELINE_ID,
-    model_arch=QWEN3_TTS_PIPELINE.model_arch,
+    model_arch=_ROLLOUT_MODEL_ARCH,
     stages=(
         replace(QWEN3_TTS_PIPELINE.stages[0], final_output=True, final_output_type="latent"),
         replace(QWEN3_TTS_PIPELINE.stages[1], sync_process_input_func=_SYNC_PROCESSOR),
@@ -103,6 +106,7 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
     @classmethod
     def ensure_pipeline_registered(cls, pipeline_mode="full"):
         cls._check_mode(pipeline_mode)
+        ModelRegistry.register_model(_ROLLOUT_MODEL_ARCH, _ROLLOUT_MODEL_CLASS)
         register_pipeline(QWEN3_TTS_RL_PIPELINE)
 
     @classmethod

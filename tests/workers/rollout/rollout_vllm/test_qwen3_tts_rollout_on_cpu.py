@@ -23,7 +23,9 @@ pytest.importorskip("vllm_omni")
 
 from vllm import SamplingParams
 
+from verl_omni.pipelines.qwen3_tts import omni_rollout_adapter
 from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
+from verl_omni.pipelines.qwen3_tts.rollout_model import _align_prompt_embedding_dtype
 from verl_omni.pipelines.qwen3_tts.talker_training_adapter import Qwen3TTSTalkerAdapter
 from verl_omni.workers.rollout.vllm_rollout.utils import _receive_model_weight_buckets
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
@@ -35,6 +37,44 @@ class _Tokenizer:
 
     def __call__(self, text, **kwargs):
         return {"input_ids": list(range(len(text)))}
+
+
+def test_rollout_pipeline_registers_dtype_aligned_talker(monkeypatch):
+    registered_models = []
+    registered_pipelines = []
+    monkeypatch.setattr(
+        omni_rollout_adapter.ModelRegistry,
+        "register_model",
+        lambda architecture, model_class: registered_models.append((architecture, model_class)),
+    )
+    monkeypatch.setattr(
+        omni_rollout_adapter,
+        "register_pipeline",
+        lambda pipeline: registered_pipelines.append(pipeline),
+    )
+
+    Qwen3TTSRolloutAdapter.ensure_pipeline_registered()
+
+    assert registered_models == [
+        (
+            "Qwen3TTSDtypeAlignedTalkerForConditionalGeneration",
+            "verl_omni.pipelines.qwen3_tts.rollout_model:Qwen3TTSDtypeAlignedTalkerForConditionalGeneration",
+        )
+    ]
+    assert registered_pipelines == [omni_rollout_adapter.QWEN3_TTS_RL_PIPELINE]
+    assert registered_pipelines[0].model_arch == registered_models[0][0]
+
+
+def test_rollout_model_aligns_talker_and_prompt_builder_embedding_dtype():
+    model = SimpleNamespace(
+        _embedding_dtype=torch.bfloat16,
+        _prompt_builder=SimpleNamespace(_embedding_dtype=torch.bfloat16),
+    )
+
+    _align_prompt_embedding_dtype(model, torch.float32)
+
+    assert model._embedding_dtype == torch.float32
+    assert model._prompt_builder._embedding_dtype == torch.float32
 
 
 def test_rollout_adapter_builds_unique_prompt_and_scopes_weight_sync(tmp_path):

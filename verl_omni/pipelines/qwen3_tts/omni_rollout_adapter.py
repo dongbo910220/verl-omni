@@ -31,13 +31,12 @@ from verl_omni.pipelines.qwen3_tts.talker_forward import (
     load_speaker_xvector,
     require_auto_language,
 )
-from verl_omni.pipelines.qwen3_tts.vllm_plugin import ROLLOUT_MODEL_ARCH, register_qwen3_tts_rollout_model
 
 _PIPELINE_ID = "qwen3_tts_rl"
 _SYNC_PROCESSOR = "verl_omni.pipelines.qwen3_tts.omni_rollout_adapter.talker2code2wav_token_only"
 QWEN3_TTS_RL_PIPELINE = PipelineConfig(
     model_type=_PIPELINE_ID,
-    model_arch=ROLLOUT_MODEL_ARCH,
+    model_arch=QWEN3_TTS_PIPELINE.model_arch,
     stages=(
         replace(QWEN3_TTS_PIPELINE.stages[0], final_output=True, final_output_type="latent"),
         replace(QWEN3_TTS_PIPELINE.stages[1], sync_process_input_func=_SYNC_PROCESSOR),
@@ -51,8 +50,8 @@ def _load_speaker_vector(path: str) -> list[float]:
 
 
 def _completion(output):
-    request_output = getattr(output, "request_output", None)
-    completions = getattr(request_output, "outputs", None) if request_output is not None else None
+    request_output = getattr(output, "request_output", None) or output
+    completions = getattr(request_output, "outputs", None)
     return completions[0] if completions else None
 
 
@@ -104,7 +103,6 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
     @classmethod
     def ensure_pipeline_registered(cls, pipeline_mode="full"):
         cls._check_mode(pipeline_mode)
-        register_qwen3_tts_rollout_model()
         register_pipeline(QWEN3_TTS_RL_PIPELINE)
 
     @classmethod
@@ -121,6 +119,19 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
     def supports_cache_engine_sleep(cls, pipeline_mode="full"):
         cls._check_mode(pipeline_mode)
         return False
+
+    @classmethod
+    def get_worker_extension_cls(cls, pipeline_mode="full"):
+        cls._check_mode(pipeline_mode)
+        return "verl_omni.pipelines.qwen3_tts.worker_extension.Qwen3TTSColocateWorkerExtension"
+
+    @classmethod
+    async def initialize_rollout_workers(cls, engine, pipeline_mode="full"):
+        cls._check_mode(pipeline_mode)
+        await engine.collective_rpc(
+            method="align_qwen3_tts_prompt_embedding_dtype",
+            stage_ids=[0],
+        )
 
     @classmethod
     def get_stage_engine_extras(cls, stage_id, pipeline_mode="full"):

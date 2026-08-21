@@ -172,6 +172,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         except Exception:
             pass
 
+        if self._omni_rollout_adapter is not None:
+            extension_cls = self._omni_rollout_adapter.get_worker_extension_cls(self._omni_pipeline_mode)
+            if extension_cls is not None:
+                return extension_cls
+
         # vLLMOmniColocateWorkerExtension supports LoRA + weight updates for GPU.
         # vLLMOmniNPUColocateWorkerExtension additionally mixes in NPUColocateWorkerMixin
         # for NPU memory pool, sleep, and wake_up.
@@ -387,6 +392,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
+        if self._omni_rollout_adapter is not None:
+            await self._omni_rollout_adapter.initialize_rollout_workers(
+                engine_client,
+                self._omni_pipeline_mode,
+            )
 
         # Deploy config YAML is consumed by AsyncOmni above; clean up the temp dir.
         if getattr(self, "_temp_deploy_ctx", None) is not None:

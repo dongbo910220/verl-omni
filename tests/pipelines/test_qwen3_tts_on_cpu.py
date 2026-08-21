@@ -57,6 +57,16 @@ def test_talker_batch_matches_auto_language_teacher_forcing_layout():
     assert batch.codec_lens == [3]
 
 
+def test_codec0_mask_matches_rollout_vocabulary():
+    masked = forward.mask_codec0_logits(torch.zeros((1, 2, 4300)), 2048, TOKENS.codec_eos)
+
+    assert (masked[..., 0] < -1e3).all()
+    assert torch.isfinite(masked[..., 1:2048]).all()
+    assert (masked[..., 2048 : TOKENS.codec_eos] < -1e3).all()
+    assert torch.isfinite(masked[..., TOKENS.codec_eos]).all()
+    assert (masked[..., TOKENS.codec_eos + 1 :] < -1e3).all()
+
+
 def test_only_validated_auto_language_layout_is_accepted():
     assert forward.require_auto_language("auto") == "Auto"
     with pytest.raises(ValueError, match="supports only tts_language=Auto"):
@@ -109,7 +119,11 @@ def test_actor_logits_align_to_effective_codec0_response(monkeypatch):
     )
 
     assert torch.nonzero(logits.abs().sum(dim=-1)[0], as_tuple=False).reshape(-1).tolist() == [5, 6, 7]
-    torch.testing.assert_close(logits[0, 5], torch.arange(1, 4301, dtype=torch.float32))
+    assert logits[0, 5, 0] == -1e4
+    assert logits[0, 5, 1] == 2
+    assert logits[0, 5, 2047] == 2048
+    assert logits[0, 5, 2048] == -1e4
+    assert logits[0, 5, TOKENS.codec_eos] == TOKENS.codec_eos + 1
 
 
 @pytest.mark.parametrize("response_length", [2, 14, 15, 16, 17, 32])

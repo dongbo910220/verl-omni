@@ -178,6 +178,15 @@ def codec0_logits(talker, batch: TalkerBatch, speaker_embedding: torch.Tensor) -
     return output.logits
 
 
+def mask_codec0_logits(logits: torch.Tensor, codebook_vocab: int, codec_eos_token_id: int) -> torch.Tensor:
+    """Match the codec-token vocabulary exposed by the rollout model."""
+    valid = torch.zeros(logits.shape[-1], dtype=torch.bool, device=logits.device)
+    valid[1 : min(codebook_vocab, logits.shape[-1])] = True
+    if 0 <= codec_eos_token_id < logits.shape[-1]:
+        valid[codec_eos_token_id] = True
+    return logits.masked_fill(~valid, -1e4)
+
+
 def tts_actor_logits(
     model,
     input_ids,
@@ -216,7 +225,11 @@ def tts_actor_logits(
         device=input_ids.device,
         sub_codebook_vocab=sub_vocab,
     )
-    logits = codec0_logits(talker, batch, speaker_embedding)
+    logits = mask_codec0_logits(
+        codec0_logits(talker, batch, speaker_embedding),
+        sub_vocab,
+        int(model.config.talker_config.codec_eos_token_id),
+    )
     output_vocab = max(logits.shape[-1], int(input_ids.max()) + 1)
     aligned = logits.new_zeros((batch_size, output_len, output_vocab))
     for index, response_start in enumerate(response_starts):

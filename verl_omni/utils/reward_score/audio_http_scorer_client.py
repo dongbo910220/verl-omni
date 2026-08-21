@@ -21,6 +21,9 @@ from typing import Any
 import aiohttp
 import numpy as np
 
+from verl_omni.utils.learning_trace import emit as trace_emit
+from verl_omni.utils.learning_trace import span as trace_span
+
 PROTOCOL_VERSION = "1"
 
 
@@ -163,13 +166,45 @@ async def compute_score(
     if retry_backoff_s < 0:
         raise ValueError("retry_backoff_s must be non-negative.")
     payload = _serialize_request(solution_audio, ground_truth, extra_info)
+    step = int(payload["metadata"].get("global_steps") or 0)
+    candidate_key = payload["metadata"].get("_learning_trace_candidate_key")
 
     last_error = None
     for attempt in range(max_retries + 1):
-        try:
-            return await _request_score(server_url, payload, timeout_s)
-        except (_RetryableHTTPError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
-            last_error = exc
+        with trace_span(
+            "reward.http",
+            step=step,
+            payload={"candidate_key": candidate_key, "attempt": attempt + 1, "timeout_s": timeout_s},
+        ):
+            trace_emit(
+                "reward.http_request",
+                step=step,
+                payload={
+                    "candidate_key": candidate_key,
+                    "attempt": attempt + 1,
+                    "num_samples": payload["num_samples"],
+                    "sample_rate": payload["sample_rate"],
+                    "prompt": payload["prompt"],
+                },
+            )
+            try:
+                result = await _request_score(server_url, payload, timeout_s)
+            except (_RetryableHTTPError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
+                last_error = exc
+                trace_emit(
+                    "reward.http_retryable_error",
+                    step=step,
+                    payload={"candidate_key": candidate_key, "attempt": attempt + 1, "error": str(exc)},
+                    status="error",
+                )
+            else:
+                trace_emit(
+                    "reward.http_response",
+                    step=step,
+                    payload={"candidate_key": candidate_key, "attempt": attempt + 1, "result": result},
+                    status="ok",
+                )
+                return result
         if attempt < max_retries:
             await asyncio.sleep(retry_backoff_s * (2**attempt))
     raise RuntimeError(f"Audio scoring failed after {max_retries + 1} attempts: {last_error}") from last_error

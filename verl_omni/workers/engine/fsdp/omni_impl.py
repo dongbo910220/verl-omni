@@ -34,6 +34,10 @@ from verl.workers.engine.base import EngineRegistry
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
 from verl_omni.utils.fsdp_utils import collect_lora_params
+from verl_omni.utils.learning_trace import emit as trace_emit
+from verl_omni.utils.learning_trace import enabled as learning_trace_enabled
+from verl_omni.utils.learning_trace import extract_step, summarize_module_parameters, traced_weight_iterator
+from verl_omni.utils.learning_trace import span as trace_span
 from verl_omni.workers.config import OmniModelConfig
 
 logger = logging.getLogger(__name__)
@@ -171,6 +175,16 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
 
+        per_tensor_param = traced_weight_iterator(
+            per_tensor_param,
+            step=getattr(self, "_learning_trace_step", extract_step()),
+            payload={
+                "engine_class": type(self).__name__,
+                "forward_only": bool(self.engine_config.forward_only),
+                "requested_sync_dtype": str(sync_dtype),
+                "base_sync_done": bool(base_sync_done),
+            },
+        )
         return per_tensor_param, peft_config_dict
 
     def _merged_lora_per_tensor_param(self, weight_sync_dtype=None):
@@ -240,9 +254,133 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
             module.to(torch_dtype)
 
+            trace_emit(
+                "model.trainability",
+                payload={
+                    "engine_class": type(self).__name__,
+                    "role": "reference" if self.engine_config.forward_only else "actor",
+                    "model_stage": self.model_config.model_stage,
+                    "architecture": self.model_config.architecture,
+                    "configured_dtype": str(torch_dtype),
+                    "parameters": summarize_module_parameters(module, include_norms=False),
+                },
+            )
+
             if self.model_config.enable_gradient_checkpointing:
                 module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         return module
+
+    def forward_backward_batch(self, data, loss_function, forward_only=False):
+        if not learning_trace_enabled():
+            return super().forward_backward_batch(data, loss_function, forward_only=forward_only)
+        step = extract_step(data)
+        self._learning_trace_step = step
+        traced_fields = {}
+        for key in ("responses", "response_mask", "old_log_probs", "ref_log_prob", "advantages", "loss_mask"):
+            try:
+                if key in data:
+                    traced_fields[key] = data[key]
+            except Exception:
+                pass
+        with trace_span(
+            "engine.forward_backward",
+            step=step,
+            payload={
+                "engine_class": type(self).__name__,
+                "forward_only": bool(forward_only),
+                "batch_size": list(data.batch_size),
+                "fields": traced_fields,
+            },
+        ):
+            output = super().forward_backward_batch(data, loss_function, forward_only=forward_only)
+        trace_emit(
+            "engine.forward_backward_result",
+            step=step,
+            payload={"output": output},
+            status="ok",
+        )
+        return output
+
+    def optimizer_step(self):
+        if not learning_trace_enabled():
+            return super().optimizer_step()
+        step = getattr(self, "_learning_trace_step", extract_step())
+        before = summarize_module_parameters(self.module, include_norms=True)
+        learning_rates = [float(group["lr"]) for group in self.optimizer.param_groups]
+        trace_emit(
+            "optimizer.pre_step",
+            step=step,
+            payload={"learning_rates": learning_rates, "module": before},
+        )
+        with trace_span("optimizer.step", step=step):
+            grad_norm = super().optimizer_step()
+        after = summarize_module_parameters(self.module, include_norms=True)
+        trace_emit(
+            "optimizer.post_step",
+            step=step,
+            payload={
+                "learning_rates": learning_rates,
+                "grad_norm": grad_norm,
+                "parameter_fingerprint_before": before["parameter_fingerprint"],
+                "parameter_fingerprint_after": after["parameter_fingerprint"],
+                "parameter_fingerprint_changed": (before["parameter_fingerprint"] != after["parameter_fingerprint"]),
+                "module": after,
+            },
+            status="ok",
+        )
+        return grad_norm
+
+    def save_checkpoint(
+        self,
+        local_path,
+        hdfs_path=None,
+        global_step=0,
+        max_ckpt_to_keep=None,
+        **kwargs,
+    ):
+        with trace_span(
+            "engine.checkpoint_save",
+            step=int(global_step),
+            payload={"rank": self.rank, "local_path": local_path},
+        ):
+            result = super().save_checkpoint(
+                local_path,
+                hdfs_path,
+                global_step,
+                max_ckpt_to_keep,
+                **kwargs,
+            )
+        trace_emit(
+            "engine.checkpoint_save_result",
+            step=int(global_step),
+            payload={
+                "rank": self.rank,
+                "local_path": local_path,
+                "parameter_fingerprint": summarize_module_parameters(self.module, include_norms=False)[
+                    "parameter_fingerprint"
+                ],
+            },
+        )
+        return result
+
+    def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=True, **kwargs):
+        with trace_span(
+            "engine.checkpoint_load",
+            payload={"rank": self.rank, "local_path": local_path},
+        ):
+            result = super().load_checkpoint(local_path, hdfs_path, del_local_after_load, **kwargs)
+        trace_emit(
+            "engine.checkpoint_load_result",
+            step=extract_step(),
+            payload={
+                "rank": self.rank,
+                "local_path": local_path,
+                "parameter_fingerprint": summarize_module_parameters(self.module, include_norms=False)[
+                    "parameter_fingerprint"
+                ],
+            },
+        )
+        return result
 
     def _build_lora_module(self, module):
         module = super()._build_lora_module(module)

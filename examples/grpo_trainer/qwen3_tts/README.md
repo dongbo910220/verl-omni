@@ -115,3 +115,29 @@ This smoke proves rollout, finite audio reward, optimizer update, weight sync,
 and checkpoint wiring only. It is not evidence that GRPO improves held-out
 speech quality; that requires the complete fixed-validation curve and paired
 human listening evaluation.
+
+## Learning trace (separate diagnostic branch)
+
+`run_qwen3_tts_learning_trace.sh` enables process-local JSONL evidence without
+changing the recipe when tracing is disabled. Use the same `TRACE_ROOT` and
+`TRACE_RUN_ID` for two independent processes:
+
+1. `TRACE_PHASE=phase-a`, `TRACE_EXPECTED_STEP=1`, `RESUME_MODE=disable`, and
+   `TOTAL_TRAINING_STEPS=1`.
+2. Exit the first Python/Ray process completely.
+3. `TRACE_PHASE=phase-b`, `TRACE_EXPECTED_STEP=2`, `RESUME_MODE=auto`, and
+   `TOTAL_TRAINING_STEPS=2` against the same checkpoint directory.
+
+Audit both phases with:
+
+```bash
+python scripts/analyze_qwen3_tts_learning_trace.py "$TRACE_ROOT" \
+    --run-id "$TRACE_RUN_ID" \
+    --phases phase-a,phase-b \
+    --expected-candidates 32
+```
+
+The analyzer fails closed if a required stage is absent, the `B=4/G=8`
+cardinality changes, rollout/actor consistency misses the smoke thresholds,
+parameters do not update, or phase B does not load step 1 in a fresh
+controller process.

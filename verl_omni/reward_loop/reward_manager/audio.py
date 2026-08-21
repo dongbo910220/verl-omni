@@ -21,6 +21,10 @@ import torch
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 
+from verl_omni.utils.learning_trace import emit as trace_emit
+from verl_omni.utils.learning_trace import span as trace_span
+from verl_omni.utils.learning_trace import summarize_tensor
+
 
 class AudioRewardManager(RewardManagerBase):
     """Route one validated waveform per rollout to a custom reward function."""
@@ -98,24 +102,53 @@ class AudioRewardManager(RewardManagerBase):
         extra_info["global_steps"] = batch.get("global_steps", extra_info.get("global_steps", 0))
         ground_truth = batch["reward_model"]["ground_truth"]
         audio = self._extract_audio(item, extra_info)
+        step = int(extra_info.get("global_steps") or 0)
+        candidate_key = extra_info.get("_learning_trace_candidate_key")
         kwargs = {
             "data_source": batch["data_source"],
             "solution_audio": audio,
             "ground_truth": ground_truth,
             "extra_info": extra_info,
         }
-        if self.is_async_reward_score:
-            result = await self.compute_score(**kwargs)
-        else:
-            result = await self.loop.run_in_executor(None, lambda: self.compute_score(**kwargs))
-        if isinstance(result, dict):
-            if "score" not in result:
-                raise ValueError("Audio reward result dictionary is missing 'score'.")
-            score = float(result["score"])
-            reward_extra_info = {key: value for key, value in result.items() if key != "score"}
-        else:
-            score = float(result)
-            reward_extra_info = {"acc": score}
-        if not math.isfinite(score):
-            raise ValueError(f"Audio reward must be finite, got {score!r}.")
+        with trace_span(
+            "reward.score",
+            step=step,
+            payload={"candidate_key": candidate_key, "data_source": batch["data_source"]},
+        ):
+            trace_emit(
+                "reward.input",
+                step=step,
+                payload={
+                    "candidate_key": candidate_key,
+                    "ground_truth": ground_truth,
+                    "data_source": batch["data_source"],
+                    "sample_rate": audio[1],
+                    "waveform": summarize_tensor(audio[0], exact_limit=0),
+                    "sampling_seed": extra_info.get("_learning_trace_sampling_seed"),
+                },
+            )
+            if self.is_async_reward_score:
+                result = await self.compute_score(**kwargs)
+            else:
+                result = await self.loop.run_in_executor(None, lambda: self.compute_score(**kwargs))
+            if isinstance(result, dict):
+                if "score" not in result:
+                    raise ValueError("Audio reward result dictionary is missing 'score'.")
+                score = float(result["score"])
+                reward_extra_info = {key: value for key, value in result.items() if key != "score"}
+            else:
+                score = float(result)
+                reward_extra_info = {"acc": score}
+            if not math.isfinite(score):
+                raise ValueError(f"Audio reward must be finite, got {score!r}.")
+            trace_emit(
+                "reward.output",
+                step=step,
+                payload={
+                    "candidate_key": candidate_key,
+                    "score": score,
+                    "reward_extra_info": reward_extra_info,
+                },
+                status="ok",
+            )
         return {"reward_score": score, "reward_extra_info": reward_extra_info}

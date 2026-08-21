@@ -19,6 +19,9 @@ import logging
 import os
 import uuid
 import warnings
+from collections import Counter
+from hashlib import sha256
+from pathlib import Path
 from pprint import pprint
 from typing import Optional
 
@@ -54,6 +57,9 @@ from verl_omni.trainer.omni.omni_algos import (
     get_omni_loss_fn,
 )
 from verl_omni.utils.dataset.offline_mllm_dpo_dataset import get_batch_modality
+from verl_omni.utils.learning_trace import emit as trace_emit
+from verl_omni.utils.learning_trace import enabled as learning_trace_enabled
+from verl_omni.utils.learning_trace import span as trace_span
 from verl_omni.utils.metrics_utils import GroupedMetricMean
 from verl_omni.workers.config import OmniModelConfig
 
@@ -66,11 +72,261 @@ __all__ = ["OmniPPOTrainerSync", "OmniDirectPreferenceRayTrainer"]
 class OmniPPOTrainerSync(PPOTrainerSync):
     """``PPOTrainerSync`` subclass that wires tokenizer/processor from ``OmniModelConfig``."""
 
+    def __init__(self, config):
+        super().__init__(config)
+        trace_emit(
+            "trainer.constructed",
+            payload={
+                "class": f"{type(self).__module__}.{type(self).__name__}",
+                "trainer_mode": self.trainer_mode,
+                "train_batch_size": config.data.train_batch_size,
+                "rollout_n": config.actor_rollout_ref.rollout.n,
+            },
+        )
+
     def _init_tokenizer(self):
         # Skip super(): OmniModelConfig loads tokenizer/processor via the registered adapter.
-        model_config: OmniModelConfig = omega_conf_to_dataclass(self.config.actor_rollout_ref.model, OmniModelConfig)
-        self.tokenizer = model_config.tokenizer
-        self.processor = model_config.processor
+        with trace_span("trainer.init_tokenizer"):
+            model_config: OmniModelConfig = omega_conf_to_dataclass(
+                self.config.actor_rollout_ref.model, OmniModelConfig
+            )
+            self.tokenizer = model_config.tokenizer
+            self.processor = model_config.processor
+        trace_emit(
+            "trainer.tokenizer_ready",
+            payload={
+                "tokenizer_class": type(self.tokenizer).__name__,
+                "processor_class": type(self.processor).__name__ if self.processor is not None else None,
+            },
+        )
+
+    def _setup(self):
+        with trace_span("trainer.setup"):
+            result = super()._setup()
+        trace_emit(
+            "trainer.setup_result",
+            step=getattr(self, "global_steps", None),
+            payload={
+                "train_dataset_size": len(self.train_dataset),
+                "val_dataset_size": len(self.val_dataset),
+                "global_steps": self.global_steps,
+                "total_training_steps": self.total_training_steps,
+                "actor_worker_group_class": type(self.actor_rollout_wg).__name__,
+                "rollout_manager_class": type(self.llm_server_manager).__name__,
+            },
+        )
+        return result
+
+    def fit(self, agent_loop_manager):
+        trace_emit(
+            "trainer.agent_loop_ready",
+            step=getattr(self, "global_steps", None),
+            payload={"class": f"{type(agent_loop_manager).__module__}.{type(agent_loop_manager).__name__}"},
+        )
+        with trace_span("trainer.lifecycle", step=getattr(self, "global_steps", None)):
+            return super().fit(agent_loop_manager)
+
+    def step(self, metrics: dict, timing_raw: dict):
+        step = int(self.global_steps)
+        with trace_span("controller.training_step", step=step):
+            result = super().step(metrics, timing_raw)
+        trace_emit(
+            "controller.training_step_result",
+            step=step,
+            payload={
+                "candidate_count": len(result),
+                "partition_id": result.partition_id,
+                "metrics": metrics,
+            },
+        )
+        return result
+
+    def on_step_begin(self):
+        trace_emit("controller.step_begin", step=int(self.global_steps), payload={"global_steps": self.global_steps})
+        return super().on_step_begin()
+
+    def on_init_end(self):
+        step = int(self.global_steps)
+        with trace_span("weights.sync", step=step, payload={"reason": "initial_or_resumed_model"}):
+            result = super().on_init_end()
+        trace_emit("weights.sync_result", step=step, payload={"reason": "initial_or_resumed_model"})
+        return result
+
+    def on_step_end(self):
+        step = int(self.global_steps)
+        with trace_span("weights.sync", step=step, payload={"reason": "post_optimizer_update"}):
+            result = super().on_step_end()
+        trace_emit("weights.sync_result", step=step, payload={"reason": "post_optimizer_update"})
+        return result
+
+    def _load_checkpoint(self):
+        resume_mode = str(self.config.trainer.resume_mode)
+        checkpoint_root = Path(str(self.config.trainer.default_local_dir)).expanduser().resolve()
+        with trace_span(
+            "checkpoint.load",
+            payload={"resume_mode": resume_mode, "checkpoint_root": str(checkpoint_root)},
+        ):
+            result = super()._load_checkpoint()
+        trace_emit(
+            "checkpoint.load_result",
+            step=int(self.global_steps),
+            payload={
+                "resume_mode": resume_mode,
+                "checkpoint_root": str(checkpoint_root),
+                "loaded_step": int(self.global_steps),
+                "loaded_checkpoint": (
+                    str(checkpoint_root / f"global_step_{self.global_steps}") if self.global_steps else None
+                ),
+            },
+        )
+        return result
+
+    @staticmethod
+    def _checkpoint_manifest(path: Path) -> list[dict[str, object]]:
+        manifest = []
+        if not path.exists():
+            return manifest
+        for file in sorted(item for item in path.rglob("*") if item.is_file()):
+            stat = file.stat()
+            row: dict[str, object] = {
+                "path": str(file.relative_to(path)),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+            if stat.st_size <= 8 * 1024 * 1024:
+                digest = sha256()
+                with file.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                row["sha256"] = digest.hexdigest()
+            manifest.append(row)
+        return manifest
+
+    def _save_checkpoint(self):
+        step = int(self.global_steps)
+        checkpoint_path = (
+            Path(str(self.config.trainer.default_local_dir)).expanduser().resolve() / f"global_step_{step}"
+        )
+        with trace_span("checkpoint.save", step=step, payload={"path": str(checkpoint_path)}):
+            result = super()._save_checkpoint()
+        trace_emit(
+            "checkpoint.save_result",
+            step=step,
+            payload={
+                "path": str(checkpoint_path),
+                "exists": checkpoint_path.exists(),
+                "files": self._checkpoint_manifest(checkpoint_path),
+            },
+        )
+        return result
+
+    @staticmethod
+    def _prompt_group_key(candidate_key: str) -> str:
+        parts = candidate_key.rsplit("_", 2)
+        return parts[0] if len(parts) == 3 else candidate_key
+
+    @classmethod
+    def _trace_candidate_rows(cls, batch, fields: tuple[str, ...]) -> dict[str, object]:
+        import transfer_queue as tq
+
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=list(fields))
+        padded = data.to_padded_tensor()
+        masks = padded.get("response_mask")
+        rows = []
+        prompt_groups: Counter[str] = Counter()
+        for index, candidate_key in enumerate(batch.keys):
+            candidate_key = str(candidate_key)
+            prompt_group = cls._prompt_group_key(candidate_key)
+            prompt_groups[prompt_group] += 1
+            row: dict[str, object] = {
+                "candidate_key": candidate_key,
+                "prompt_group_key": prompt_group,
+                "tag": batch.tags[index],
+            }
+            mask = masks[index].bool() if masks is not None else None
+            if mask is not None:
+                row["response_length"] = int(mask.sum().item())
+            for field in fields:
+                if field == "response_mask" or field not in padded:
+                    continue
+                value = padded[field][index]
+                if mask is not None and getattr(value, "ndim", 0) > 0 and value.shape[0] == mask.shape[0]:
+                    value = value[mask]
+                if field == "rm_scores":
+                    row["score_sum"] = float(value.float().sum().item())
+                row[field] = value.detach().cpu().tolist() if hasattr(value, "detach") else value
+            rows.append(row)
+        return {
+            "candidate_count": len(rows),
+            "prompt_group_count": len(prompt_groups),
+            "group_sizes": dict(sorted(prompt_groups.items())),
+            "rows": rows,
+        }
+
+    def _emit_tq_stage(self, event: str, batch, fields: tuple[str, ...], metrics: dict | None = None):
+        if not learning_trace_enabled():
+            return
+        step = int(self.global_steps)
+        try:
+            payload = self._trace_candidate_rows(batch, fields)
+            if metrics is not None:
+                payload["metrics"] = metrics
+            trace_emit(event, step=step, payload=payload, status="ok")
+        except Exception as exc:
+            trace_emit(
+                f"{event}_trace_error",
+                step=step,
+                payload={"exception_type": type(exc).__name__, "exception": str(exc)},
+                status="error",
+            )
+
+    def _compute_old_log_prob(self, batch, metrics: dict):
+        step = int(self.global_steps)
+        with trace_span("controller.old_log_prob_compute", step=step):
+            result = super()._compute_old_log_prob(batch, metrics)
+        self._emit_tq_stage(
+            "controller.old_log_prob",
+            result,
+            ("responses", "response_mask", "rollout_log_probs", "old_log_probs", "entropy"),
+            metrics,
+        )
+        return result
+
+    def _compute_ref_log_prob(self, batch, metrics: dict):
+        step = int(self.global_steps)
+        with trace_span("controller.ref_log_prob_compute", step=step):
+            result = super()._compute_ref_log_prob(batch, metrics)
+        self._emit_tq_stage("controller.ref_log_prob", result, ("response_mask", "ref_log_prob"), metrics)
+        return result
+
+    def _compute_advantage(self, batch, metrics: dict):
+        step = int(self.global_steps)
+        with trace_span("controller.advantage_compute", step=step):
+            result = super()._compute_advantage(batch, metrics)
+        self._emit_tq_stage(
+            "controller.advantage",
+            result,
+            ("response_mask", "rm_scores", "advantages", "returns"),
+            metrics,
+        )
+        return result
+
+    def _update_actor(self, batch, metrics: dict):
+        step = int(self.global_steps)
+        if learning_trace_enabled():
+            batch.extra_info["learning_trace_global_step"] = step
+            self._emit_tq_stage(
+                "controller.actor_update_input",
+                batch,
+                ("response_mask", "rm_scores", "old_log_probs", "ref_log_prob", "advantages"),
+            )
+        with trace_span("controller.actor_update", step=step):
+            result = super()._update_actor(batch, metrics)
+        actor_metrics = {
+            key: value for key, value in metrics.items() if key.startswith("actor/") or key.startswith("perf/")
+        }
+        trace_emit("controller.actor_update_result", step=step, payload={"metrics": actor_metrics})
+        return result
 
 
 class OmniDirectPreferenceRayTrainer:

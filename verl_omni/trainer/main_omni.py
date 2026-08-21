@@ -42,6 +42,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     PolicyGradientRayTrainer,
 )
 from verl_omni.utils.fs import resolve_model_local_dir
+from verl_omni.utils.learning_trace import emit as trace_emit
 
 __all__ = [
     "RayTrainerTaskRunner",
@@ -335,6 +336,15 @@ def run_omni(config, task_runner_class=None) -> None:
         config.trainer.use_v1 = True
         if task_runner_class is None:
             task_runner_class = TaskRunnerV1
+        trace_emit(
+            "runtime.dispatch",
+            payload={
+                "backend": "verl_v1",
+                "task_runner": f"{task_runner_class.__module__}.{task_runner_class.__name__}",
+                "trainer_mode": OmegaConf.select(config, "trainer.v1.trainer_mode"),
+                "transfer_queue": True,
+            },
+        )
         run_ppo(config, task_runner_class=task_runner_class)
         return
 
@@ -357,6 +367,28 @@ def main(config):
             use_critic=need_critic(config),
         )
     OmegaConf.resolve(config)
+    trace_emit(
+        "entrypoint.config",
+        payload={
+            "entrypoint": "verl_omni.trainer.main_omni",
+            "model_path": OmegaConf.select(config, "actor_rollout_ref.model.path"),
+            "model_stage": OmegaConf.select(config, "actor_rollout_ref.model.model_stage"),
+            "train_file": OmegaConf.select(config, "data.train_files"),
+            "val_file": OmegaConf.select(config, "data.val_files"),
+            "train_batch_size": OmegaConf.select(config, "data.train_batch_size"),
+            "rollout_n": OmegaConf.select(config, "actor_rollout_ref.rollout.n"),
+            "rollout_dtype": OmegaConf.select(config, "actor_rollout_ref.rollout.dtype"),
+            "actor_lr": OmegaConf.select(config, "actor_rollout_ref.actor.optim.lr"),
+            "actor_dtype": OmegaConf.select(config, "actor_rollout_ref.actor.fsdp_config.dtype"),
+            "use_kl_loss": OmegaConf.select(config, "actor_rollout_ref.actor.use_kl_loss"),
+            "kl_loss_coef": OmegaConf.select(config, "actor_rollout_ref.actor.kl_loss_coef"),
+            "adv_estimator": OmegaConf.select(config, "algorithm.adv_estimator"),
+            "norm_adv_by_std_in_grpo": OmegaConf.select(config, "algorithm.norm_adv_by_std_in_grpo"),
+            "total_training_steps": OmegaConf.select(config, "trainer.total_training_steps"),
+            "resume_mode": OmegaConf.select(config, "trainer.resume_mode"),
+            "checkpoint_dir": OmegaConf.select(config, "trainer.default_local_dir"),
+        },
+    )
     run_omni(config)
 
 

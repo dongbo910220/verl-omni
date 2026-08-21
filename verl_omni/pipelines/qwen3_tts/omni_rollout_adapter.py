@@ -31,6 +31,10 @@ from verl_omni.pipelines.qwen3_tts.talker_forward import (
     load_speaker_xvector,
     require_auto_language,
 )
+from verl_omni.utils.learning_trace import emit as trace_emit
+from verl_omni.utils.learning_trace import enabled as learning_trace_enabled
+from verl_omni.utils.learning_trace import expected_step, summarize_tensor
+from verl_omni.utils.learning_trace import span as trace_span
 
 _PIPELINE_ID = "qwen3_tts_rl"
 _SYNC_PROCESSOR = "verl_omni.pipelines.qwen3_tts.omni_rollout_adapter.talker2code2wav_token_only"
@@ -159,50 +163,99 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
         assistant_ids = torch.as_tensor(assistant_ids).reshape(-1).tolist()
         prompt_length = len(assistant_ids) + 2
         identity = "\0".join((text, str(language), str(speaker_path))).encode()
-        return {
+        result = {
             "prompt_token_ids": [1] * prompt_length,
             "additional_information": additional_information,
             "cache_salt": hashlib.sha256(identity).hexdigest(),
         }
+        trace_emit(
+            "rollout.engine_prompt",
+            step=expected_step(),
+            payload={
+                "text": text,
+                "language": language,
+                "input_token_count": len(prompt_ids),
+                "engine_prompt_token_count": prompt_length,
+                "cache_salt": result["cache_salt"],
+            },
+        )
+        return result
 
     @classmethod
     def combine_engine_outputs(cls, outputs, prompt):
-        policy_output = None
-        policy_length = -1
-        audio_codes = waveform = None
-        sample_rate = None
-        diagnostics = []
-        for output in outputs:
-            completion = _completion(output)
-            if getattr(output, "stage_id", None) == 0 and completion is not None:
-                length = len(getattr(completion, "token_ids", None) or [])
-                if length >= policy_length:
-                    policy_output, policy_length = output, length
-            multimodal = getattr(output, "multimodal_output", None)
-            diagnostics.append((getattr(output, "stage_id", None), type(multimodal).__name__))
-            if not isinstance(multimodal, Mapping):
-                continue
-            codes = multimodal.get("codes")
-            if isinstance(codes, Mapping):
-                audio_codes = append_tensor_chunk(audio_codes, codes.get("audio"))
-            if getattr(output, "stage_id", None) == 1:
-                waveform = append_tensor_chunk(
-                    waveform, multimodal.get("audio", multimodal.get("model_outputs")), flatten=True
+        step = expected_step()
+        with trace_span("rollout.stages", step=step, payload={"output_count": len(outputs)}):
+            policy_output = None
+            policy_length = -1
+            audio_codes = waveform = None
+            sample_rate = None
+            diagnostics = []
+            stage_rows = []
+            request_ids = []
+            for output in outputs:
+                completion = _completion(output)
+                request_output = getattr(output, "request_output", None) or output
+                request_id = getattr(request_output, "request_id", None) or getattr(output, "request_id", None)
+                if request_id is not None:
+                    request_ids.append(str(request_id))
+                stage_id = getattr(output, "stage_id", None)
+                token_count = len(getattr(completion, "token_ids", None) or []) if completion is not None else 0
+                if stage_id == 0 and completion is not None and token_count >= policy_length:
+                    policy_output, policy_length = output, token_count
+                multimodal = getattr(output, "multimodal_output", None)
+                diagnostics.append((stage_id, type(multimodal).__name__))
+                stage_rows.append(
+                    {
+                        "stage_id": stage_id,
+                        "request_id": request_id,
+                        "token_count": token_count,
+                        "multimodal_type": type(multimodal).__name__,
+                        "multimodal_keys": sorted(map(str, multimodal.keys()))
+                        if isinstance(multimodal, Mapping)
+                        else [],
+                    }
                 )
-                sample_rate = multimodal.get("sr", multimodal.get("audio_sample_rate", sample_rate))
-        if policy_output is None:
-            raise RuntimeError("Qwen3-TTS rollout produced no stage-0 policy output.")
-        token_ids = list(getattr(_completion(policy_output), "token_ids", None) or [])
-        if audio_codes is None:
-            raise RuntimeError(f"Qwen3-TTS rollout produced no codec trajectory: {diagnostics}")
-        fields = {
-            "tts_audio_codes": align_audio_codes(audio_codes, token_ids),
-            "tts_text": prompt["additional_information"]["text"][0],
-        }
-        if waveform is not None:
-            fields["audio"] = waveform.float().reshape(-1)
-        if sample_rate is not None:
-            if isinstance(sample_rate, list | tuple):
-                sample_rate = sample_rate[-1]
-            fields["audio_sample_rate"] = int(sample_rate.item() if hasattr(sample_rate, "item") else sample_rate)
+                if not isinstance(multimodal, Mapping):
+                    continue
+                codes = multimodal.get("codes")
+                if isinstance(codes, Mapping):
+                    audio_codes = append_tensor_chunk(audio_codes, codes.get("audio"))
+                if stage_id == 1:
+                    waveform = append_tensor_chunk(
+                        waveform, multimodal.get("audio", multimodal.get("model_outputs")), flatten=True
+                    )
+                    sample_rate = multimodal.get("sr", multimodal.get("audio_sample_rate", sample_rate))
+            if policy_output is None:
+                raise RuntimeError("Qwen3-TTS rollout produced no stage-0 policy output.")
+            token_ids = list(getattr(_completion(policy_output), "token_ids", None) or [])
+            if audio_codes is None:
+                raise RuntimeError(f"Qwen3-TTS rollout produced no codec trajectory: {diagnostics}")
+            aligned_codes = align_audio_codes(audio_codes, token_ids)
+            fields = {
+                "tts_audio_codes": aligned_codes,
+                "tts_text": prompt["additional_information"]["text"][0],
+            }
+            if waveform is not None:
+                fields["audio"] = waveform.float().reshape(-1)
+            if sample_rate is not None:
+                if isinstance(sample_rate, list | tuple):
+                    sample_rate = sample_rate[-1]
+                fields["audio_sample_rate"] = int(sample_rate.item() if hasattr(sample_rate, "item") else sample_rate)
+            if learning_trace_enabled():
+                fields["_learning_trace_request_ids"] = sorted(set(request_ids))
+            trace_emit(
+                "rollout.stages_result",
+                step=step,
+                payload={
+                    "request_ids": sorted(set(request_ids)),
+                    "text": fields["tts_text"],
+                    "stages": stage_rows,
+                    "policy_token_count": len(token_ids),
+                    "policy_token_ids": token_ids,
+                    "audio_codes": summarize_tensor(aligned_codes, exact_limit=0),
+                    "waveform": summarize_tensor(waveform, exact_limit=0) if waveform is not None else None,
+                    "sample_rate": fields.get("audio_sample_rate"),
+                },
+                status="ok",
+            )
         return policy_output, fields

@@ -811,6 +811,16 @@ class OmniRolloutPipelineBase:
         return {}
 
     @classmethod
+    def get_worker_extension_cls(cls, pipeline_mode: str = "thinker_only") -> str | None:
+        """Return a model-specific vLLM worker extension, if required."""
+        return None
+
+    @classmethod
+    async def initialize_rollout_workers(cls, engine, pipeline_mode: str = "thinker_only") -> None:
+        """Run model-specific setup after all rollout workers are ready."""
+        return
+
+    @classmethod
     def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only") -> dict:
         """Return per-stage ``engine_extras`` to inject into the deploy config.
 

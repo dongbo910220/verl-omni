@@ -49,9 +49,6 @@ dependencies = [
     "TransferQueue==0.1.8",
 ]
 
-[project.entry-points."vllm.general_plugins"]
-verl_omni_qwen3_tts_rollout = "verl_omni.pipelines.qwen3_tts.vllm_plugin:register_qwen3_tts_rollout_model"
-
 [project.optional-dependencies]
 # Rollout engine (install in step 2, after gpu step 1).
 vllm-omni = [

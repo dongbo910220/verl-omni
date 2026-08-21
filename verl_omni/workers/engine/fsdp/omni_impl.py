@@ -43,6 +43,37 @@ logger = logging.getLogger(__name__)
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
 
+    def _run_with_manual_ref_offload(self, call):
+        adapter_cls = getattr(self, "model_adapter_cls", None)
+        manual_ref_offload = (
+            getattr(adapter_cls, "requires_manual_ref_offload", False)
+            and getattr(self.engine_config, "forward_only", False)
+            and not getattr(self.engine_config, "param_offload", True)
+        )
+        if not manual_ref_offload:
+            return call()
+
+        self.engine_config.forward_only = False
+        try:
+            return call()
+        finally:
+            self.engine_config.forward_only = True
+
+    def _build_fsdp_module(self, module):
+        parent_build = super()._build_fsdp_module
+        return self._run_with_manual_ref_offload(lambda: parent_build(module))
+
+    def to(self, device, model=True, optimizer=True, grad=True):
+        parent_to = super().to
+        return self._run_with_manual_ref_offload(lambda: parent_to(device, model=model, optimizer=optimizer, grad=grad))
+
+    def prepare_model_inputs(self, micro_batch):
+        model_inputs, output_args = super().prepare_model_inputs(micro_batch)
+        adapter_cls = getattr(self, "model_adapter_cls", None)
+        if adapter_cls is not None:
+            model_inputs = adapter_cls.prepare_model_inputs(model_inputs, micro_batch, self.model_config)
+        return model_inputs, output_args
+
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
@@ -187,6 +218,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                 self.model_config.model_stage,
                 self.model_config.get("external_lib"),
             )
+            self.model_adapter_cls = adapter_cls
             module = adapter_cls.configure_model(module, self.model_config)
 
             module.to(torch_dtype)

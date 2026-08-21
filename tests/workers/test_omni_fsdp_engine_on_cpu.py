@@ -284,6 +284,35 @@ def test_direct_preference_prepare_model_inputs_delegates_to_base_engine():
     assert output_args == {"base": True}
 
 
+def test_prepare_model_inputs_applies_adapter_logprob_output_args_hook():
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.model_config = _make_mock_model_config(trainer_type="policy_gradient")
+    engine._trainer_type = "policy_gradient"
+    micro_batch = TensorDict({}, batch_size=[0])
+
+    class Adapter:
+        @classmethod
+        def prepare_model_inputs(cls, model_inputs, micro_batch, model_config):
+            return {**model_inputs, "adapter_input": True}
+
+        @classmethod
+        def prepare_logprob_output_args(cls, output_args, micro_batch, model_config):
+            return {**output_args, "temperature": torch.ones(1)}
+
+    engine.model_adapter_cls = Adapter
+    with patch.object(
+        omni_impl.FSDPEngineWithLMHead,
+        "prepare_model_inputs",
+        return_value=({"input_ids": torch.ones(1, 1, dtype=torch.long)}, {"base": True}),
+    ):
+        model_inputs, output_args = engine.prepare_model_inputs(micro_batch)
+
+    assert model_inputs["adapter_input"] is True
+    assert output_args["base"] is True
+    torch.testing.assert_close(output_args["temperature"], torch.ones(1))
+
+
 # ---------------------------------------------------------------------------
 # ``collect_lora_params`` import source
 # ---------------------------------------------------------------------------

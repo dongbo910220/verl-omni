@@ -58,6 +58,9 @@ lora_rank: 0
 # LoRA scaling factor
 lora_alpha: 16
 
+# Dropout applied on LoRA inputs
+lora_dropout: 0.0
+
 # Optional dtype for LoRA parameters (e.g., "float32"); null = use model dtype
 lora_dtype: null
 
@@ -76,7 +79,11 @@ exclude_modules: null
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
 
-# Named LoRA policy states required by the algorithm. "reference" disables adapters.
+# Optional frozen LoRA adapter used as the logical reference policy. When null,
+# reference inference disables all adapters and therefore uses the base model.
+reference_adapter_name: null
+
+# Named LoRA policy states required by the algorithm.
 policy_state_adapters: ["default"]
 
 # FSDP layer name prefixes for LoRA parameter layered summon.

@@ -484,7 +484,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.engine.eval_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="eval_batch", logger=None) as timer,
         ):
-            adapter_ctx = self.engine.disable_adapter() if no_lora_adapter else nullcontext()
+            adapter_ctx = self.engine.use_reference_adapter() if no_lora_adapter else nullcontext()
             with adapter_ctx:
                 output = self.engine.infer_batch(data, loss_function=loss_function)
         delta_time = timer.last

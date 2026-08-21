@@ -759,6 +759,16 @@ class OmniRolloutPipelineBase:
         return {}
 
     @classmethod
+    def weight_sync_stage_ids(cls, pipeline_mode="thinker_only") -> list[int] | None:
+        """Return stages that receive actor weights, or all stages by default."""
+        return None
+
+    @classmethod
+    def supports_cache_engine_sleep(cls, pipeline_mode="thinker_only") -> bool:
+        """Return whether the pipeline supports rollout cache sleep and wake."""
+        return True
+
+    @classmethod
     def get_pipeline_id(cls, pipeline_mode: str = "thinker_only") -> str:
         """Return the vLLM-Omni pipeline model_type for *pipeline_mode*.
 
@@ -812,3 +822,24 @@ class OmniRolloutPipelineBase:
             dict: Extra key-value pairs merged into the stage's engine args.
         """
         return {}
+
+    @classmethod
+    def prepare_engine_prompt(
+        cls,
+        prompt_ids: list[int],
+        model_config,
+        multi_modal_data: dict,
+        mm_processor_kwargs: Optional[dict] = None,
+    ) -> dict | None:
+        """Build an architecture-specific rollout prompt when required."""
+        return None
+
+    @classmethod
+    def get_output_modalities(cls, pipeline_mode: str = "thinker_only") -> list[str] | None:
+        """Return intermediate modalities that must be retained by the engine."""
+        return None
+
+    @classmethod
+    def combine_engine_outputs(cls, outputs: list, prompt: dict) -> tuple[Any, dict[str, Any]]:
+        """Select the policy output and collect architecture-specific fields."""
+        return (outputs[-1] if outputs else None), {}

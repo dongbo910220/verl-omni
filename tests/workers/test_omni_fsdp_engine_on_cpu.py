@@ -355,6 +355,69 @@ def test_collect_lora_params_import_not_from_verl():
 
 
 # ---------------------------------------------------------------------------
+# Qwen3-TTS reference-policy manual offload
+# ---------------------------------------------------------------------------
+
+
+def _make_manual_ref_engine(omni_impl, *, enabled=True):
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.engine_config = types.SimpleNamespace(forward_only=True, param_offload=False)
+    engine.model_adapter_cls = types.SimpleNamespace(requires_manual_ref_offload=enabled)
+    return engine
+
+
+def test_tts_ref_build_disables_forced_fsdp_cpu_offload_temporarily():
+    omni_impl = _get_omni_impl_module()
+    engine = _make_manual_ref_engine(omni_impl)
+    observed = []
+
+    def fake_build(module):
+        observed.append(engine.engine_config.forward_only)
+        return module
+
+    module = object()
+    with patch.object(omni_impl.FSDPEngineWithLMHead, "_build_fsdp_module", side_effect=fake_build):
+        assert engine._build_fsdp_module(module) is module
+
+    assert observed == [False]
+    assert engine.engine_config.forward_only is True
+
+
+def test_tts_ref_to_uses_manual_load_path_and_restores_on_error():
+    omni_impl = _get_omni_impl_module()
+    engine = _make_manual_ref_engine(omni_impl)
+    observed = []
+
+    def fake_to(*args, **kwargs):
+        observed.append((engine.engine_config.forward_only, args, kwargs))
+        raise RuntimeError("test failure")
+
+    with (
+        patch.object(omni_impl.FSDPEngineWithLMHead, "to", side_effect=fake_to),
+        pytest.raises(RuntimeError, match="test failure"),
+    ):
+        engine.to("cuda", model=True, optimizer=False, grad=False)
+
+    assert observed == [(False, ("cuda",), {"model": True, "optimizer": False, "grad": False})]
+    assert engine.engine_config.forward_only is True
+
+
+def test_non_tts_ref_keeps_standard_forward_only_path():
+    omni_impl = _get_omni_impl_module()
+    engine = _make_manual_ref_engine(omni_impl, enabled=False)
+    observed = []
+
+    def fake_build(module):
+        observed.append(engine.engine_config.forward_only)
+        return module
+
+    with patch.object(omni_impl.FSDPEngineWithLMHead, "_build_fsdp_module", side_effect=fake_build):
+        engine._build_fsdp_module(object())
+
+    assert observed == [True]
+
+
+# ---------------------------------------------------------------------------
 # ``_build_module`` calls adapter ``configure_model``
 # ---------------------------------------------------------------------------
 

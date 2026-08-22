@@ -16,7 +16,7 @@ import os
 import time
 
 import torch
-from verl.utils.device import get_torch_device, get_visible_devices_keyword
+from verl.utils.device import get_visible_devices_keyword
 from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH, set_death_signal
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
@@ -30,28 +30,6 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 def _split_visible_devices(value: str) -> list[str]:
     """Split a visible-devices env value into stripped, non-empty entries."""
     return [entry.strip() for entry in value.split(",") if entry.strip()]
-
-
-def _receive_model_weight_buckets(receiver, model) -> None:
-    """Stream model weights and rebuild optional derived tensors once."""
-    rebuild_derived_weights = getattr(model, "_build_stacked_codec_embed", None)
-    if callable(rebuild_derived_weights):
-        model._build_stacked_codec_embed = lambda: None
-    try:
-        receiver.receive_weights(
-            on_bucket_received=lambda weights, *args, **kwargs: model.load_weights(weights)
-        )
-    finally:
-        if callable(rebuild_derived_weights):
-            model._build_stacked_codec_embed = rebuild_derived_weights
-    if callable(rebuild_derived_weights):
-        old_derived_weights = getattr(model, "_stacked_codec_embed", None)
-        model._stacked_codec_embed = None
-        del old_derived_weights
-        get_torch_device().empty_cache()
-        rebuild_derived_weights()
-
-
 class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
@@ -211,7 +189,9 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
                 patch_vllm_moe_model_weight_loader(model)
-                _receive_model_weight_buckets(receiver, model)
+                receiver.receive_weights(
+                    on_bucket_received=lambda weights, *args, **kwargs: model.load_weights(weights)
+                )
                 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
                 process_weights_after_loading(model, model_config, self.device)

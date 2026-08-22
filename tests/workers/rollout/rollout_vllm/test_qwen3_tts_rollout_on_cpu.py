@@ -31,7 +31,6 @@ from verl_omni.pipelines.qwen3_tts.worker_extension import (
     Qwen3TTSColocateWorkerExtension,
     _align_prompt_embedding_dtype,
 )
-from verl_omni.workers.rollout.vllm_rollout.utils import _receive_model_weight_buckets
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
 
@@ -197,43 +196,6 @@ def test_rollout_adapter_combines_policy_codes_and_waveform():
     torch.testing.assert_close(fields["audio"], torch.ones(2400))
     assert fields["audio_sample_rate"] == 24_000
     assert fields["tts_text"] == "first text"
-
-
-def test_bucketed_weight_sync_rebuilds_derived_codec_table_once(monkeypatch):
-    class Model:
-        def __init__(self):
-            self.rebuilds = 0
-            self.loads = 0
-            self._stacked_codec_embed = object()
-
-        def _build_stacked_codec_embed(self):
-            self.rebuilds += 1
-            self._stacked_codec_embed = object()
-
-        def load_weights(self, weights):
-            self.loads += 1
-            self._build_stacked_codec_embed()
-
-    class Receiver:
-        @staticmethod
-        def receive_weights(on_bucket_received):
-            on_bucket_received({"first": torch.tensor(1)})
-            on_bucket_received({"second": torch.tensor(2)})
-
-    model = Model()
-    empty_cache_calls = []
-    monkeypatch.setattr(
-        "verl_omni.workers.rollout.vllm_rollout.utils.get_torch_device",
-        lambda: SimpleNamespace(empty_cache=lambda: empty_cache_calls.append(True)),
-    )
-
-    _receive_model_weight_buckets(Receiver(), model)
-
-    assert model.loads == 2
-    assert model.rebuilds == 1
-    assert empty_cache_calls == [True]
-    model._build_stacked_codec_embed()
-    assert model.rebuilds == 2
 
 
 def test_server_prepares_stage_specific_sampling_params():

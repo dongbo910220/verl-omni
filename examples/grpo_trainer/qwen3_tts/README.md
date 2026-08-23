@@ -1,6 +1,6 @@
 # Qwen3-TTS GRPO with an audio reward
 
-Last updated: 08/21/2026.
+Last updated: 08/23/2026.
 
 This example full-parameter tunes the codec-0 policy of
 `Qwen/Qwen3-TTS-12Hz-0.6B-Base`. It uses verl's stock GRPO advantage,
@@ -97,10 +97,13 @@ bash examples/grpo_trainer/qwen3_tts/run_qwen3_tts_grpo.sh
 The example defaults are `B=4`, `G=8`, `lr=2e-7`, direct `low_var_kl` with
 coefficient `0.12`, two GPUs, and 500 updates. These are recipe values, not
 algorithm requirements. `norm_adv_by_std_in_grpo` remains at the upstream
-default. Actor, reference, rollout, and weight synchronization all use FP32:
-the codec policy sums 16 codebook embeddings autoregressively, so a nominal
-FP32 rollout with BF16 FSDP forward or BF16 synchronization does not reproduce
-the same selected-token probabilities.
+default. Actor, reference, rollout, and floating synchronized weights all use
+BF16; synchronized integer buffers keep their integer dtype. Check selected-token
+`diff_mean` and Pearson after synchronization as execution-consistency diagnostics,
+not as evidence of speech quality or FP32-equivalent numerics. Prefer
+`diff_mean < 0.005`; values from `0.005` to `0.01` require high Pearson and tail
+inspection, while sustained values at or above `0.01` should stop the run for
+investigation.
 
 For a two-update implementation smoke test:
 

@@ -27,10 +27,6 @@ from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_tts import omni_rollout_adapter
 from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
 from verl_omni.pipelines.qwen3_tts.talker_training_adapter import Qwen3TTSTalkerAdapter
-from verl_omni.pipelines.qwen3_tts.worker_extension import (
-    Qwen3TTSColocateWorkerExtension,
-    _align_prompt_embedding_dtype,
-)
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
 
@@ -47,7 +43,6 @@ def test_optional_rollout_hooks_preserve_existing_ar_defaults():
 
     assert OmniRolloutPipelineBase.weight_sync_stage_ids() is None
     assert OmniRolloutPipelineBase.supports_cache_engine_sleep()
-    assert OmniRolloutPipelineBase.get_worker_extension_cls() is None
     assert OmniRolloutPipelineBase.prepare_engine_prompt([], None, {}) is None
     assert OmniRolloutPipelineBase.get_output_modalities() is None
     assert OmniRolloutPipelineBase.combine_engine_outputs([first, final], {}) == (final, {})
@@ -67,46 +62,6 @@ def test_rollout_pipeline_registers_upstream_talker(monkeypatch):
     assert registered_pipelines[0].model_arch == omni_rollout_adapter.QWEN3_TTS_PIPELINE.model_arch
 
 
-def test_rollout_model_aligns_talker_and_prompt_builder_embedding_dtype():
-    model = SimpleNamespace(
-        _embedding_dtype=torch.bfloat16,
-        _prompt_builder=SimpleNamespace(_embedding_dtype=torch.bfloat16),
-    )
-
-    _align_prompt_embedding_dtype(model, torch.float32)
-
-    assert model._embedding_dtype == torch.float32
-    assert model._prompt_builder._embedding_dtype == torch.float32
-
-
-def test_worker_extension_aligns_loaded_model_dtype():
-    model = SimpleNamespace(
-        _embedding_dtype=torch.bfloat16,
-        _prompt_builder=SimpleNamespace(_embedding_dtype=torch.bfloat16),
-    )
-    worker = SimpleNamespace(
-        _get_standard_weight_model_and_config=lambda: (model, SimpleNamespace(dtype=torch.float32))
-    )
-
-    Qwen3TTSColocateWorkerExtension.align_qwen3_tts_prompt_embedding_dtype(worker)
-
-    assert model._embedding_dtype == torch.float32
-    assert model._prompt_builder._embedding_dtype == torch.float32
-
-
-@pytest.mark.asyncio
-async def test_rollout_adapter_initializes_stage_zero_workers():
-    calls = []
-
-    class Engine:
-        async def collective_rpc(self, **kwargs):
-            calls.append(kwargs)
-
-    await Qwen3TTSRolloutAdapter.initialize_rollout_workers(Engine(), "full")
-
-    assert calls == [{"method": "align_qwen3_tts_prompt_embedding_dtype", "stage_ids": [0]}]
-
-
 def test_rollout_adapter_builds_unique_prompt_and_scopes_weight_sync(tmp_path):
     speaker = tmp_path / "speaker.json"
     speaker.write_text("[0.0, 1.0]")
@@ -124,17 +79,6 @@ def test_rollout_adapter_builds_unique_prompt_and_scopes_weight_sync(tmp_path):
     assert Qwen3TTSRolloutAdapter.weight_sync_stage_ids("full") == [0]
     assert not Qwen3TTSRolloutAdapter.supports_cache_engine_sleep("full")
     assert Qwen3TTSRolloutAdapter.get_output_modalities("full") == ["latent", "audio"]
-    assert Qwen3TTSRolloutAdapter.get_worker_extension_cls("full") == (
-        "verl_omni.pipelines.qwen3_tts.worker_extension.Qwen3TTSColocateWorkerExtension"
-    )
-
-
-def test_server_selects_qwen3_tts_worker_extension():
-    server = object.__new__(vLLMOmniHttpServer)
-    server._omni_rollout_adapter = Qwen3TTSRolloutAdapter
-    server._omni_pipeline_mode = "full"
-
-    assert server._get_worker_extension_cls() == Qwen3TTSRolloutAdapter.get_worker_extension_cls("full")
 
 
 def test_rollout_adapter_requires_speaker_embedding():

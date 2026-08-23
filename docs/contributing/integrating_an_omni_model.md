@@ -97,9 +97,8 @@ and implement:
 
 Optional overrides fall into four groups:
 
-- Pipeline setup: `ensure_pipeline_registered`, `get_engine_hf_overrides`,
-  `get_stage_engine_extras`, `get_worker_extension_cls`, and
-  `initialize_rollout_workers`.
+- Pipeline setup: `ensure_pipeline_registered`, `get_engine_hf_overrides`, and
+  `get_stage_engine_extras`.
 - Resource behavior: `weight_sync_stage_ids` and
   `supports_cache_engine_sleep`.
 - Request construction: `prepare_engine_prompt`.
@@ -254,5 +253,6 @@ model-specific — verify each against your own model's architecture.
 - **Actor/rollout probability consistency**: Autoregressive codec policies may
   combine several codebook embeddings before predicting the selected token.
   Match actor, reference, rollout, and weight-sync dtypes, then verify selected
-  token log-probabilities before training. A nominal FP32 rollout fed BF16
-  actor weights is not an FP32 consistency check.
+  token log-probabilities before training. The Qwen3-TTS recipe uses BF16 for
+  all four paths. Treat `diff_mean` and Pearson as consistency diagnostics, not
+  evidence of speech quality or bitwise agreement with an FP32 execution.

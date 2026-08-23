@@ -50,7 +50,6 @@ Model Base
              build_stage_configs, rollout_flags, weight_sync_stage_ids,
              supports_cache_engine_sleep, get_pipeline_id,
              ensure_pipeline_registered, get_engine_hf_overrides,
-             get_worker_extension_cls, initialize_rollout_workers,
              get_stage_engine_extras, prepare_engine_prompt,
              get_output_modalities, combine_engine_outputs
 

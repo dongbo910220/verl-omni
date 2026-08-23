@@ -792,7 +792,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 3. build rollout engine
         if "rollout" in self.role:
             rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout)
-            self._rollout_weight_sync_dtype = rollout_config.dtype
 
             # TODO: move rollout_device_mesh into ServerAdapter
             # 3.1 build rollout device mesh (sglang need only)
@@ -967,17 +966,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if timings is not None:
             timings["offload_actor_to_cpu"] = time.perf_counter() - start
 
-    def _get_rollout_weight_sync_dtype(self):
-        """Use the dtype of the rollout instance that owns the target weights."""
-        rollout_dtype = getattr(self, "_rollout_weight_sync_dtype", None)
-        if rollout_dtype is not None:
-            return rollout_dtype
-        rollout_config = getattr(getattr(self, "rollout", None), "config", None)
-        rollout_dtype = getattr(rollout_config, "dtype", None)
-        if rollout_dtype is not None:
-            return rollout_dtype
-        return self.config.rollout.get("dtype", None)
-
     def _gather_lora_weights(self, timings: Optional[dict] = None):
         """Gather LoRA adapter params into a CPU dict, without offloading the actor.
 
@@ -992,7 +980,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             layered_summon=self.layered_summon,
             base_sync_done=True,
             adapter_name=self.config.rollout.rollout_adapter,
-            weight_sync_dtype=self._get_rollout_weight_sync_dtype(),
         )
         lora_weights = {name: tensor for name, tensor in per_tensor_param}
         if timings is not None:
@@ -1052,14 +1039,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 per_tensor_param, _ = self.actor.engine.get_per_tensor_param(
                     base_sync_done=True,
                     adapter_name=self.config.rollout.rollout_adapter,
-                    weight_sync_dtype=self._get_rollout_weight_sync_dtype(),
                 )
                 await self.checkpoint_engine.send_weights(per_tensor_param)
                 return
 
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param(
-                adapter_name=self.config.rollout.rollout_adapter,
-                weight_sync_dtype=self._get_rollout_weight_sync_dtype(),
+                adapter_name=self.config.rollout.rollout_adapter
             )
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return
@@ -1156,7 +1141,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 layered_summon=self.layered_summon,
                 base_sync_done=True,
                 adapter_name=self.config.rollout.rollout_adapter,
-                weight_sync_dtype=self._get_rollout_weight_sync_dtype(),
             )
 
             do_lora_base_sync = False
@@ -1170,7 +1154,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     layered_summon=self.layered_summon,
                     base_sync_done=False,
                     adapter_name=self.config.rollout.rollout_adapter,
-                    weight_sync_dtype=self._get_rollout_weight_sync_dtype(),
                 )
                 await self.rollout.update_weights(
                     per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps

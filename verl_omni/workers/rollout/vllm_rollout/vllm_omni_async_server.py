@@ -127,7 +127,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._ar_mode = omni_kwargs.get("output_mode", "diffusion") == "ar"
         self._rollout_flags: dict[int, dict] = {}
         self._omni_rollout_adapter = None
-        self._omni_pipeline_mode = "thinker_only"
         self._rollout_output_modalities: list[str] | None = None
         self._weight_sync_stage_ids: list[int] | None = None
         self._stage_sampling_constraints: dict[int, dict[str, Any]] = {}
@@ -172,11 +171,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         except Exception:
             pass
 
-        if self._omni_rollout_adapter is not None:
-            extension_cls = self._omni_rollout_adapter.get_worker_extension_cls(self._omni_pipeline_mode)
-            if extension_cls is not None:
-                return extension_cls
-
         # vLLMOmniColocateWorkerExtension supports LoRA + weight updates for GPU.
         # vLLMOmniNPUColocateWorkerExtension additionally mixes in NPUColocateWorkerMixin
         # for NPU memory pool, sleep, and wake_up.
@@ -211,7 +205,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                         "set actor_rollout_ref.rollout.free_cache_engine=false."
                     )
                 self._omni_rollout_adapter = adapter_cls
-                self._omni_pipeline_mode = pipeline_mode
                 # Generate deploy config using the adapter's stage topology.
                 self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, pipeline_mode)
                 # Store per-stage rollout flags for downstream use.
@@ -392,11 +385,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
-        if self._omni_rollout_adapter is not None:
-            await self._omni_rollout_adapter.initialize_rollout_workers(
-                engine_client,
-                self._omni_pipeline_mode,
-            )
 
         # Deploy config YAML is consumed by AsyncOmni above; clean up the temp dir.
         if getattr(self, "_temp_deploy_ctx", None) is not None:

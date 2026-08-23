@@ -308,23 +308,21 @@ def test_prepare_model_inputs_applies_adapter_hook():
     assert output_args == {"base": True}
 
 
-def test_weight_sync_dtype_honors_float32_rollout():
+def test_weight_sync_casts_floating_dtensor_to_bfloat16():
     omni_impl = _get_omni_impl_module()
-    tensor = torch.tensor([1.25], dtype=torch.bfloat16)
+    tensor = torch.tensor([1.25], dtype=torch.float32)
 
-    dtype = omni_impl.OmniFSDPEngine._resolve_weight_sync_dtype("float32")
-    synced = omni_impl.OmniFSDPEngine._cast_weight_for_sync(tensor, dtype)
+    synced = omni_impl.OmniFSDPEngine._cast_dtensor_weight_for_sync(tensor)
 
-    assert dtype is torch.float32
-    assert synced.dtype is torch.float32
+    assert synced.dtype is torch.bfloat16
     assert synced.item() == pytest.approx(1.25)
 
 
-def test_weight_sync_dtype_keeps_integer_buffers():
+def test_weight_sync_keeps_integer_dtensor_buffers():
     omni_impl = _get_omni_impl_module()
     tensor = torch.tensor([1, 2], dtype=torch.int64)
 
-    synced = omni_impl.OmniFSDPEngine._cast_weight_for_sync(tensor, torch.float32)
+    synced = omni_impl.OmniFSDPEngine._cast_dtensor_weight_for_sync(tensor)
 
     assert synced is tensor
     assert synced.dtype is torch.int64

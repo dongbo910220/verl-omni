@@ -44,27 +44,10 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
 
     @staticmethod
-    def _resolve_weight_sync_dtype(weight_sync_dtype):
-        if weight_sync_dtype is None or isinstance(weight_sync_dtype, torch.dtype):
-            return weight_sync_dtype
-
-        from verl.utils.torch_dtypes import PrecisionType
-
-        return PrecisionType.to_dtype(weight_sync_dtype)
-
-    @staticmethod
-    def _cast_weight_for_sync(tensor: torch.Tensor, dtype: torch.dtype | None) -> torch.Tensor:
-        if dtype is not None and tensor.is_floating_point() and tensor.dtype != dtype:
-            return tensor.to(dtype=dtype, non_blocking=True)
+    def _cast_dtensor_weight_for_sync(tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.is_floating_point() and tensor.dtype != torch.bfloat16:
+            return tensor.to(dtype=torch.bfloat16, non_blocking=True)
         return tensor
-
-    def _materialize_weight_for_sync(self, param, device, dtype: torch.dtype | None) -> torch.Tensor:
-        if isinstance(param, DTensor):
-            tensor = param.to(device, non_blocking=True).full_tensor()
-            dtype = torch.bfloat16 if dtype is None else dtype
-        else:
-            tensor = param
-        return self._cast_weight_for_sync(tensor, dtype)
 
     def _run_with_manual_ref_offload(self, call):
         adapter_cls = getattr(self, "model_adapter_cls", None)
@@ -97,15 +80,8 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             model_inputs = adapter_cls.prepare_model_inputs(model_inputs, micro_batch, self.model_config)
         return model_inputs, output_args
 
-    def get_per_tensor_param(
-        self,
-        layered_summon=False,
-        base_sync_done=False,
-        weight_sync_dtype=None,
-        **kwargs,
-    ):
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
-        sync_dtype = self._resolve_weight_sync_dtype(weight_sync_dtype)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
         # leaves the module half-moved and crashes state_dict() below (verl#5995). The
@@ -131,7 +107,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                 if not base_sync_done:
                     params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
             else:  # merge lora
-                return self._merged_lora_per_tensor_param(sync_dtype), None
+                return self._merged_lora_per_tensor_param(), None
         else:
             params = self.module.state_dict()
 
@@ -142,10 +118,19 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             offload_fsdp_model_to_cpu(self.module)
         log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
-        device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-        per_tensor_param = (
-            (name, self._materialize_weight_for_sync(param, device, sync_dtype)) for name, param in params.items()
-        )
+        if peft_config is not None and base_sync_done:
+            per_tensor_param = params.items()
+        else:
+            device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+            per_tensor_param = (
+                (
+                    name,
+                    self._cast_dtensor_weight_for_sync(param.to(device, non_blocking=True).full_tensor())
+                    if isinstance(param, DTensor)
+                    else param,
+                )
+                for name, param in params.items()
+            )
 
         if self._qat_enabled:
             from verl.utils.qat.quantizer import QATQuantizer
@@ -173,17 +158,20 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         return per_tensor_param, peft_config_dict
 
-    def _merged_lora_per_tensor_param(self, weight_sync_dtype=None):
+    def _merged_lora_per_tensor_param(self):
         """Stream materialized merged weights before restoring the actor."""
         device = get_device_id()
-        sync_dtype = self._resolve_weight_sync_dtype(weight_sync_dtype)
         try:
             with merged_lora_context(self.module, backup_adapters=True):
                 params = normalize_peft_param_name(self.module.state_dict())
                 params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
                 for name, param in params.items():
-                    materialized = self._materialize_weight_for_sync(param, device, sync_dtype)
-                    yield name, materialized.detach().clone()
+                    yield (
+                        name,
+                        self._cast_dtensor_weight_for_sync(param.to(device, non_blocking=True).full_tensor())
+                        if isinstance(param, DTensor)
+                        else param.detach().clone(),
+                    )
         finally:
             log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
             if self._is_offload_param:

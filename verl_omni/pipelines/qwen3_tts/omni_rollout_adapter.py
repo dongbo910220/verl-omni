@@ -121,19 +121,6 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
         return False
 
     @classmethod
-    def get_worker_extension_cls(cls, pipeline_mode="full"):
-        cls._check_mode(pipeline_mode)
-        return "verl_omni.pipelines.qwen3_tts.worker_extension.Qwen3TTSColocateWorkerExtension"
-
-    @classmethod
-    async def initialize_rollout_workers(cls, engine, pipeline_mode="full"):
-        cls._check_mode(pipeline_mode)
-        await engine.collective_rpc(
-            method="align_qwen3_tts_prompt_embedding_dtype",
-            stage_ids=[0],
-        )
-
-    @classmethod
     def get_stage_engine_extras(cls, stage_id, pipeline_mode="full"):
         cls._check_mode(pipeline_mode)
         return {"max_model_len": 65536, "max_num_batched_tokens": 65536} if stage_id == 1 else {}

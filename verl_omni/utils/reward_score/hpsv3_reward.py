@@ -425,18 +425,29 @@ def _to_pil_hwc(image) -> Image.Image:
 
 
 def _extract_frames(solution_image, frame_interval: int = 1) -> list[Image.Image]:
+    """Extract image frames, preferring the canonical CHW/TCHW layout."""
     is_channels_last = solution_image.shape[-1] in (1, 3) if solution_image.ndim >= 3 else False
 
     if solution_image.ndim == 3:
-        if is_channels_last:
-            solution_image = solution_image.permute(2, 0, 1)
+        if solution_image.shape[0] not in (1, 3):
+            if is_channels_last:
+                solution_image = solution_image.permute(2, 0, 1)
+            else:
+                raise ValueError(f"Expected CHW or HWC image input, got shape {tuple(solution_image.shape)}")
         solution_image = solution_image.unsqueeze(0)
 
     elif solution_image.ndim == 4:
-        if is_channels_last:
-            solution_image = solution_image.permute(3, 0, 1, 2)
-        solution_image = solution_image[:, ::frame_interval]
-        solution_image = solution_image.permute(1, 0, 2, 3)
+        if solution_image.shape[1] in (1, 3):
+            # The reward-manager contract is TCHW; sample its leading time axis.
+            solution_image = solution_image[::frame_interval]
+        elif is_channels_last:
+            # Keep the existing channels-last extension for THWC direct callers.
+            solution_image = solution_image[::frame_interval].permute(0, 3, 1, 2)
+        elif solution_image.shape[0] in (1, 3):
+            # Preserve compatibility with the legacy CTHW interpretation.
+            solution_image = solution_image[:, ::frame_interval].permute(1, 0, 2, 3)
+        else:
+            raise ValueError(f"Expected TCHW or THWC video input, got shape {tuple(solution_image.shape)}")
 
     elif solution_image.ndim == 5:
         if is_channels_last:

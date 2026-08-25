@@ -22,7 +22,6 @@ from types import ModuleType
 
 import pytest
 import torch
-from PIL import Image
 
 
 def _load_module():
@@ -69,6 +68,10 @@ class _FakeInferencer:
 
 def _image(value: int) -> torch.Tensor:
     return torch.full((3, 2, 2), value, dtype=torch.uint8)
+
+
+def _video(values) -> torch.Tensor:
+    return torch.stack([_image(value) for value in values])
 
 
 def _reset_consumer(monkeypatch, inferencer):
@@ -145,15 +148,17 @@ async def test_consumer_batches_burst_requests_and_preserves_order(monkeypatch):
     assert [result["score"] for result in results] == pytest.approx([0.0, 0.1, 0.2, 0.3])
 
 
+@pytest.mark.parametrize("channels_last", [False, True])
 @pytest.mark.asyncio
-async def test_single_video_is_split_by_total_frame_cap_and_averaged(monkeypatch):
+async def test_single_video_is_split_by_total_frame_cap_and_averaged(monkeypatch, channels_last):
     inferencer = _FakeInferencer()
     state = _reset_consumer(monkeypatch, inferencer)
-    frames = [Image.new("RGB", (2, 2), (value, value, value)) for value in [1, 2, 3, 4, 5]]
-    monkeypatch.setattr(hpsv3_reward, "_extract_frames", lambda solution_image, frame_interval: frames)
+    video = _video([1, 2, 3, 4, 5])
+    if channels_last:
+        video = video.permute(0, 2, 3, 1)
 
     result = await _score(
-        torch.zeros((5, 3, 2, 2), dtype=torch.uint8),
+        video,
         max_batch_size=2,
         reward_scale=0.5,
         extra_info={"frame_interval": 1},
@@ -162,6 +167,34 @@ async def test_single_video_is_split_by_total_frame_cap_and_averaged(monkeypatch
 
     assert [len(images) for images, _ in inferencer.batches] == [2, 2, 1]
     assert result == {"score": pytest.approx(1.5), "hpsv3_raw": pytest.approx(3.0)}
+
+
+@pytest.mark.parametrize("channels_last", [False, True])
+def test_extract_frames_samples_the_time_axis(channels_last):
+    video = _video([1, 2, 3, 4, 5])
+    if channels_last:
+        video = video.permute(0, 2, 3, 1)
+
+    frames = hpsv3_reward._extract_frames(video, frame_interval=2)
+
+    assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 3, 5]
+
+
+def test_extract_frames_prefers_tchw_when_width_is_channel_sized():
+    video = torch.stack([torch.full((3, 2, 3), value, dtype=torch.uint8) for value in [1, 2, 3]])
+
+    frames = hpsv3_reward._extract_frames(video)
+
+    assert [frame.size for frame in frames] == [(3, 2)] * 3
+    assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 2, 3]
+
+
+def test_extract_frames_preserves_legacy_cthw_direct_calls():
+    video = _video([1, 2, 3, 4, 5]).permute(1, 0, 2, 3)
+
+    frames = hpsv3_reward._extract_frames(video, frame_interval=2)
+
+    assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 3, 5]
 
 
 @pytest.mark.asyncio

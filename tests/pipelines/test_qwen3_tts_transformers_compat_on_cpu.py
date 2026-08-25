@@ -44,6 +44,7 @@ def test_qwen_tts_tiny_model_constructs_and_forwards_without_source_patch():
     with compat.qwen3_tts_import_context():
         config_module = importlib.import_module("qwen_tts.core.models.configuration_qwen3_tts")
         model_module = importlib.import_module("qwen_tts.core.models.modeling_qwen3_tts")
+    compat.patch_qwen3_tts_config_defaults(config_module.Qwen3TTSConfig)
 
     predictor = {
         "vocab_size": 32,
@@ -72,7 +73,6 @@ def test_qwen_tts_tiny_model_constructs_and_forwards_without_source_patch():
         "text_vocab_size": 80,
         "spk_id": {},
         "codec_language_id": {},
-        "pad_token_id": None,
         "rope_scaling": {
             "rope_type": "default",
             "type": "default",
@@ -86,6 +86,7 @@ def test_qwen_tts_tiny_model_constructs_and_forwards_without_source_patch():
         tts_model_type="custom",
         tokenizer_type="12hz",
     )
+    assert config.talker_config.pad_token_id is None
     model = model_module.Qwen3TTSForConditionalGeneration(config)
     output = model.talker(
         inputs_embeds=torch.randn(2, 5, 8),

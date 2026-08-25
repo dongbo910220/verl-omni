@@ -25,7 +25,10 @@ from verl_omni.pipelines.qwen3_tts.talker_forward import (
     require_auto_language,
     tts_actor_logits,
 )
-from verl_omni.pipelines.qwen3_tts.transformers_compat import qwen3_tts_import_context
+from verl_omni.pipelines.qwen3_tts.transformers_compat import (
+    patch_qwen3_tts_config_defaults,
+    qwen3_tts_import_context,
+)
 
 logger = logging.getLogger(__name__)
 _PASSTHROUGH_TEMPLATE = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
@@ -65,6 +68,7 @@ def register_qwen3_tts_automodel() -> None:
 
     from transformers import AutoConfig, AutoModelForMultimodalLM
 
+    patch_qwen3_tts_config_defaults(config_cls)
     try:
         AutoConfig.register(getattr(config_cls, "model_type", "qwen3_tts"), config_cls)
     except ValueError:

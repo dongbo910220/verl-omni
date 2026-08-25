@@ -38,6 +38,13 @@ def _compatible_mask(original):
     return wrapper
 
 
+def patch_qwen3_tts_config_defaults(config_cls) -> None:
+    """Restore the config default that qwen-tts expects from Transformers 4.x."""
+    talker_config_cls = getattr(config_cls, "sub_configs", {}).get("talker_config")
+    if talker_config_cls is not None and not hasattr(talker_config_cls, "pad_token_id"):
+        talker_config_cls.pad_token_id = None
+
+
 @contextmanager
 def qwen3_tts_import_context():
     """Expose the TF5 APIs expected while qwen-tts binds its imports.

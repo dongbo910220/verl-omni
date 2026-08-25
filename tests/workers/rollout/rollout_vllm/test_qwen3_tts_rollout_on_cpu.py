@@ -13,6 +13,8 @@
 # limitations under the License.
 """CPU contracts for Qwen3-TTS's multi-stage rollout integration."""
 
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -23,6 +25,7 @@ pytest.importorskip("vllm_omni")
 
 from vllm import SamplingParams
 
+from verl_omni.agent_loop.single_turn_agent_loop import OmniSingleTurnAgentLoop
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_tts import omni_rollout_adapter
 from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
@@ -38,6 +41,22 @@ class _Tokenizer:
         return {"input_ids": list(range(len(text)))}
 
 
+def test_external_module_import_registers_omni_agent_loop():
+    code = """
+import vllm_omni.platforms as platforms
+from vllm_omni.platforms.interface import UnspecifiedOmniPlatform
+
+platforms._current_omni_platform = UnspecifiedOmniPlatform()
+
+import verl_omni
+from verl.experimental.agent_loop.agent_loop import _agent_loop_registry
+
+target = _agent_loop_registry[\"omni_single_turn_agent\"][\"_target_\"]
+assert target == \"verl_omni.agent_loop.single_turn_agent_loop.OmniSingleTurnAgentLoop\"
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
 def test_optional_rollout_hooks_preserve_existing_ar_defaults():
     first, final = object(), object()
 
@@ -45,7 +64,92 @@ def test_optional_rollout_hooks_preserve_existing_ar_defaults():
     assert OmniRolloutPipelineBase.supports_cache_engine_sleep()
     assert OmniRolloutPipelineBase.prepare_engine_prompt([], None, {}) is None
     assert OmniRolloutPipelineBase.get_output_modalities() is None
+    sampling_params = {"temperature": 0.8}
+    assert (
+        OmniRolloutPipelineBase.prepare_agent_sampling_params(
+            sampling_params,
+            rollout_config=None,
+            trainer_config=None,
+            agent_inputs={},
+        )
+        == sampling_params
+    )
+    assert (
+        OmniRolloutPipelineBase.postprocess_agent_loop_output(
+            final,
+            tokenizer=None,
+            response_length=8,
+        )
+        is final
+    )
     assert OmniRolloutPipelineBase.combine_engine_outputs([first, final], {}) == (final, {})
+
+
+def test_omni_single_turn_agent_resolves_registered_pipeline_adapter():
+    rollout_config = SimpleNamespace(engine_kwargs={"vllm_omni": {"pipeline_name": "qwen3_tts_rl"}})
+
+    assert OmniSingleTurnAgentLoop._resolve_rollout_adapter(rollout_config) is Qwen3TTSRolloutAdapter
+
+    missing_config = SimpleNamespace(engine_kwargs={"vllm_omni": {"pipeline_name": "missing"}})
+    with pytest.raises(ValueError, match="requires a registered"):
+        OmniSingleTurnAgentLoop._resolve_rollout_adapter(missing_config)
+
+
+@pytest.mark.asyncio
+async def test_omni_single_turn_agent_delegates_policy_mapping_to_adapter():
+    class Adapter:
+        @staticmethod
+        def prepare_agent_sampling_params(sampling_params, **kwargs):
+            assert kwargs["agent_inputs"]["session_id"] == 2
+            return {**sampling_params, "seed": 123}
+
+        @staticmethod
+        def postprocess_agent_loop_output(output, **kwargs):
+            assert kwargs["response_length"] == 4
+            output.prompt_ids = [0]
+            return output
+
+    class Server:
+        async def generate(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(
+                token_ids=[101, 102],
+                log_probs=[-0.1, -0.2],
+                routed_experts=None,
+                num_preempted=0,
+                extra_fields={"audio": torch.ones(8)},
+            )
+
+    loop = object.__new__(OmniSingleTurnAgentLoop)
+    loop.rollout_adapter = Adapter
+    loop.rollout_config = SimpleNamespace(response_length=4, full_determinism=True)
+    loop.response_length = 4
+    loop.config = SimpleNamespace(data={"seed": 42})
+    loop.server_manager = Server()
+    loop.tokenizer = _Tokenizer()
+    loop.process_multi_modal_info = lambda messages: _async_value({})
+    loop.ct_build_initial_tokens = lambda *args, **kwargs: _async_value([11, 12])
+    loop._assert_mm_supported = lambda has_multi_modal: None
+    loop._get_mm_processor_kwargs = lambda audios: {}
+
+    result = await OmniSingleTurnAgentLoop.run.__wrapped__(
+        loop,
+        {"temperature": 0.8},
+        priority=7,
+        raw_prompt=[{"role": "user", "content": "hello"}],
+        session_id=2,
+    )
+
+    assert loop.server_manager.kwargs["request_id"] == "det-7"
+    assert loop.server_manager.kwargs["sampling_params"]["seed"] == 123
+    assert result.prompt_ids == [0]
+    assert result.response_ids == [101, 102]
+    assert result.response_logprobs == [-0.1, -0.2]
+    assert result.extra_fields["audio"].shape == (8,)
+
+
+async def _async_value(value):
+    return value
 
 
 def test_rollout_pipeline_registers_upstream_talker(monkeypatch):
@@ -140,6 +244,48 @@ def test_rollout_adapter_combines_policy_codes_and_waveform():
     torch.testing.assert_close(fields["audio"], torch.ones(2400))
     assert fields["audio_sample_rate"] == 24_000
     assert fields["tts_text"] == "first text"
+
+
+def test_rollout_adapter_prepares_sampling_and_actor_policy_sequence():
+    rollout_config = SimpleNamespace(n=8, val_kwargs=SimpleNamespace(n=1))
+    trainer_config = SimpleNamespace(data={"seed": 42})
+    agent_inputs = {
+        "extra_info": {"split": "train", "id": "sample-7"},
+        "session_id": 3,
+        "global_steps": 12,
+        "uid": "uid-7",
+    }
+
+    seeded = Qwen3TTSRolloutAdapter.prepare_agent_sampling_params(
+        {"temperature": 0.8},
+        rollout_config=rollout_config,
+        trainer_config=trainer_config,
+        agent_inputs=agent_inputs,
+    )
+    assert seeded["seed"] == seeded["extra_args"]["tts_local_seed"]
+
+    codes = torch.arange(5 * 16, dtype=torch.long).reshape(5, 16)
+    output = SimpleNamespace(
+        prompt_ids=[9, 8],
+        response_ids=[7, 6, 5, 4, 3],
+        response_mask=[1] * 5,
+        response_logprobs=[-0.1, -0.2, -0.3, -0.4, -0.5],
+        extra_fields={"tts_audio_codes": codes, "tts_text": "first text"},
+    )
+
+    result = Qwen3TTSRolloutAdapter.postprocess_agent_loop_output(
+        output,
+        tokenizer=_Tokenizer(),
+        response_length=3,
+    )
+
+    assert result is output
+    assert result.prompt_ids == [0]
+    assert result.response_ids == codes[:3, 0].tolist()
+    assert result.response_mask == [1, 1, 1]
+    assert result.response_logprobs == [-0.1, -0.2, -0.3]
+    torch.testing.assert_close(result.extra_fields["tts_audio_codes"], codes[:3])
+    assert result.extra_fields["tts_text_ids"]
 
 
 def test_server_prepares_stage_specific_sampling_params():

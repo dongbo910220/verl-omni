@@ -25,8 +25,14 @@ from vllm_omni.config.stage_config import PipelineConfig
 from vllm_omni.model_executor.models.qwen3_tts.pipeline import QWEN3_TTS_PIPELINE
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
-from verl_omni.pipelines.qwen3_tts.rollout_utils import align_audio_codes, append_tensor_chunk
+from verl_omni.pipelines.qwen3_tts.rollout_utils import (
+    align_audio_codes,
+    append_tensor_chunk,
+    is_evaluation_split,
+    with_rollout_generation_seed,
+)
 from verl_omni.pipelines.qwen3_tts.talker_forward import (
+    TEXT_PROMPT_TRAILER_TOKENS,
     build_assistant_text,
     load_speaker_xvector,
     require_auto_language,
@@ -124,6 +130,58 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
     def get_stage_engine_extras(cls, stage_id, pipeline_mode="full"):
         cls._check_mode(pipeline_mode)
         return {"max_model_len": 65536, "max_num_batched_tokens": 65536} if stage_id == 1 else {}
+
+    @classmethod
+    def prepare_agent_sampling_params(
+        cls,
+        sampling_params,
+        *,
+        rollout_config,
+        trainer_config,
+        agent_inputs,
+    ):
+        extra_info = agent_inputs.get("extra_info")
+        evaluation = is_evaluation_split(extra_info)
+        candidate_count = rollout_config.val_kwargs.n if evaluation else rollout_config.n
+        return with_rollout_generation_seed(
+            sampling_params,
+            extra_info,
+            session_id=agent_inputs.get("session_id"),
+            global_steps=agent_inputs.get("global_steps"),
+            uid=agent_inputs.get("uid"),
+            base_seed=int(trainer_config.data.get("seed", 0)),
+            require_session_id=int(candidate_count) > 1,
+        )
+
+    @classmethod
+    def postprocess_agent_loop_output(cls, output, *, tokenizer, response_length):
+        extra = output.extra_fields
+        codes, text = extra.get("tts_audio_codes"), extra.get("tts_text")
+        if codes is None or text is None:
+            raise RuntimeError("Qwen3-TTS rollout did not return codec codes and text.")
+        codes = torch.as_tensor(codes, dtype=torch.long)
+        if codes.ndim != 2 or codes.shape[-1] != 16:
+            raise ValueError("Qwen3-TTS codec codes must have shape (frames, 16).")
+        codes = codes[:response_length]
+        policy_ids = codes[:, 0].tolist()
+        if not policy_ids:
+            raise RuntimeError("Qwen3-TTS rollout returned an empty codec trajectory.")
+        if output.response_logprobs is not None:
+            if len(output.response_logprobs) < len(policy_ids):
+                raise RuntimeError("Qwen3-TTS rollout logprobs are shorter than the policy trajectory.")
+            output.response_logprobs = output.response_logprobs[: len(policy_ids)]
+        text_ids = tokenizer(build_assistant_text(str(text)), return_tensors="pt", padding=False)["input_ids"]
+        text_ids = torch.as_tensor(text_ids, dtype=torch.long)
+        if text_ids.ndim == 1:
+            text_ids = text_ids.unsqueeze(0)
+        if text_ids.ndim != 2 or text_ids.shape[1] <= TEXT_PROMPT_TRAILER_TOKENS:
+            raise ValueError("Qwen3-TTS assistant text tokenization returned an invalid sequence.")
+        extra["tts_text_ids"] = text_ids[:, :-TEXT_PROMPT_TRAILER_TOKENS].reshape(-1).tolist()
+        extra["tts_audio_codes"] = codes
+        output.prompt_ids = [0]
+        output.response_ids = policy_ids
+        output.response_mask = [1] * len(policy_ids)
+        return output
 
     @classmethod
     def prepare_engine_prompt(cls, prompt_ids, model_config, multi_modal_data, mm_processor_kwargs=None):

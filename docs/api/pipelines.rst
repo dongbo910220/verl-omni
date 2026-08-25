@@ -51,7 +51,8 @@ Model Base
              supports_cache_engine_sleep, get_pipeline_id,
              ensure_pipeline_registered, get_engine_hf_overrides,
              get_stage_engine_extras, prepare_engine_prompt,
-             get_output_modalities, combine_engine_outputs
+             get_output_modalities, prepare_agent_sampling_params,
+             postprocess_agent_loop_output, combine_engine_outputs
 
 .. autoclass:: verl_omni.pipelines.model_base.DiffusionModelBase
    :members: register, get_class,

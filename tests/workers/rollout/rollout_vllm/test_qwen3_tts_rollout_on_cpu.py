@@ -23,6 +23,7 @@ import torch
 pytest.importorskip("verl")
 pytest.importorskip("vllm_omni")
 
+from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
 from vllm import SamplingParams
 
 from verl_omni.agent_loop.single_turn_agent_loop import OmniSingleTurnAgentLoop
@@ -96,43 +97,36 @@ def test_omni_single_turn_agent_resolves_registered_pipeline_adapter():
 
 
 @pytest.mark.asyncio
-async def test_omni_single_turn_agent_delegates_policy_mapping_to_adapter():
+async def test_omni_single_turn_agent_delegates_policy_mapping_to_adapter(monkeypatch):
     class Adapter:
-        @staticmethod
-        def prepare_agent_sampling_params(sampling_params, **kwargs):
-            assert kwargs["agent_inputs"]["session_id"] == 2
-            return {**sampling_params, "seed": 123}
-
         @staticmethod
         def postprocess_agent_loop_output(output, **kwargs):
             assert kwargs["response_length"] == 4
             output.prompt_ids = [0]
             return output
 
-    class Server:
-        async def generate(self, **kwargs):
-            self.kwargs = kwargs
-            return SimpleNamespace(
-                token_ids=[101, 102],
-                log_probs=[-0.1, -0.2],
-                routed_experts=None,
-                num_preempted=0,
-                extra_fields={"audio": torch.ones(8)},
-            )
+    upstream_output = SimpleNamespace(
+        prompt_ids=[11, 12],
+        response_ids=[101, 102],
+        response_mask=[1, 1],
+        response_logprobs=[-0.1, -0.2],
+        extra_fields={"audio": torch.ones(8)},
+    )
+
+    async def upstream_run(_self, sampling_params, **kwargs):
+        assert sampling_params == {"temperature": 0.8}
+        assert kwargs["priority"] == 7
+        return upstream_output
+
+    monkeypatch.setattr(SingleTurnAgentLoop, "run", upstream_run)
 
     loop = object.__new__(OmniSingleTurnAgentLoop)
     loop.rollout_adapter = Adapter
-    loop.rollout_config = SimpleNamespace(response_length=4, full_determinism=True)
+    loop.rollout_config = SimpleNamespace(response_length=4)
     loop.response_length = 4
-    loop.config = SimpleNamespace(data={"seed": 42})
-    loop.server_manager = Server()
     loop.tokenizer = _Tokenizer()
-    loop.process_multi_modal_info = lambda messages: _async_value({})
-    loop.ct_build_initial_tokens = lambda *args, **kwargs: _async_value([11, 12])
-    loop._assert_mm_supported = lambda has_multi_modal: None
-    loop._get_mm_processor_kwargs = lambda audios: {}
 
-    result = await OmniSingleTurnAgentLoop.run.__wrapped__(
+    result = await OmniSingleTurnAgentLoop.run(
         loop,
         {"temperature": 0.8},
         priority=7,
@@ -140,16 +134,10 @@ async def test_omni_single_turn_agent_delegates_policy_mapping_to_adapter():
         session_id=2,
     )
 
-    assert loop.server_manager.kwargs["request_id"] == "det-7"
-    assert loop.server_manager.kwargs["sampling_params"]["seed"] == 123
     assert result.prompt_ids == [0]
     assert result.response_ids == [101, 102]
     assert result.response_logprobs == [-0.1, -0.2]
     assert result.extra_fields["audio"].shape == (8,)
-
-
-async def _async_value(value):
-    return value
 
 
 def test_rollout_pipeline_registers_upstream_talker(monkeypatch):

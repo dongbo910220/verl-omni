@@ -108,8 +108,6 @@ def _set_input_embeddings(self, value):
 
 @OmniModelBase.register("Qwen3TTSForConditionalGeneration", stage="talker")
 class Qwen3TTSTalkerAdapter(OmniModelBase):
-    disable_reference_cpu_offload = True
-
     @classmethod
     def load_hf_config(cls, model_path, *, trust_remote_code, attn_implementation):
         with qwen3_tts_import_context():

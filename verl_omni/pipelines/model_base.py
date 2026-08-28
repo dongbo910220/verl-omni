@@ -491,7 +491,6 @@ class OmniModelBase(ABC):
     """
 
     _registry: dict[tuple[str, str], type["OmniModelBase"]] = {}
-    disable_reference_cpu_offload = False
 
     @classmethod
     def register(cls, architecture: str, stage: str = "thinker"):

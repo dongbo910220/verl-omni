@@ -1,6 +1,6 @@
 # Qwen3-TTS GRPO with an audio reward
 
-Last updated: 08/23/2026.
+Last updated: 08/28/2026.
 
 This example full-parameter tunes the codec-0 policy of
 `Qwen/Qwen3-TTS-12Hz-0.6B-Base`. It uses verl's stock GRPO advantage,
@@ -16,6 +16,37 @@ SpeechJudge-BTRM is one possible scorer. It runs behind the generic audio HTTP
 client because its published Transformers environment conflicts with the
 Transformers 5.x vLLM stack. The Trainer and `AudioRewardManager` do not contain
 SpeechJudge-specific branches, candidate masks, ASR gates, or custom losses.
+
+## Algorithm background
+
+The rollout and update flow follows the TTS application of GRPO described in
+[Group Relative Policy Optimization for Text-to-Speech with Large Language
+Models](https://arxiv.org/abs/2509.18798): sample a group of speech-token
+trajectories for each text prompt, decode every trajectory to a waveform,
+compute scalar audio rewards, derive group-relative advantages, and replay the
+sampled policy tokens for the GRPO update with an optional reference-model KL
+penalty. That paper uses a specific ASR-based CER-and-NLL reward. This example
+keeps the same GRPO structure but intentionally places reward computation behind
+the generic audio HTTP protocol, so it is an integration of the paper-supported
+algorithm rather than an exact reproduction of its reward function or recipe.
+
+The policy boundary follows the released Qwen3-TTS architecture. The
+[Qwen3-TTS Technical Report](https://arxiv.org/abs/2601.15621) describes the
+12 Hz tokenizer as a 16-layer multi-codebook representation: the first layer
+captures semantic content, the other 15 RVQ layers add acoustic detail, the
+Talker backbone predicts codec-0, and its MTP module predicts the residual
+codebooks. This example therefore optimizes codec-0 as the policy sequence while
+retaining the complete 16-codebook rollout for actor replay and waveform
+decoding. Here, "teacher-forced" means that the actor replays the tokens sampled
+during rollout as fixed history; it does not mean that ground-truth speech
+tokens are used.
+
+[SpeechAlign](https://arxiv.org/abs/2404.05600) is a related multi-codebook
+speech-alignment precedent: its autoregressive model generates the first of
+eight RVQ codebooks and a pretrained non-autoregressive model supplies the
+remaining layers. It supports treating the first codebook as the optimized
+sequence while preserving residual acoustic codebooks, but it uses preference
+optimization rather than the GRPO objective implemented here.
 
 ## Install
 
@@ -118,3 +149,13 @@ This smoke proves rollout, finite audio reward, optimizer update, weight sync,
 and checkpoint wiring only. It is not evidence that GRPO improves held-out
 speech quality; that requires the complete fixed-validation curve and paired
 human listening evaluation.
+
+## References
+
+- Chang Liu, Ya-Jun Hu, Ying-Ying Gao, Shi-Lei Zhang, and Zhen-Hua Ling.
+  [Group Relative Policy Optimization for Text-to-Speech with Large Language
+  Models](https://arxiv.org/abs/2509.18798), 2025.
+- Hangrui Hu et al. [Qwen3-TTS Technical
+  Report](https://arxiv.org/abs/2601.15621), 2026.
+- Dong Zhang et al. [SpeechAlign: Aligning Speech Generation to Human
+  Preferences](https://arxiv.org/abs/2404.05600), 2024.

@@ -1,7 +1,7 @@
 (http_scorer)=
 # Using an External HTTP Scorer Service
 
-Last updated: 08/09/2026
+Last updated: 08/28/2026
 
 VeRL-Omni ships a generic HTTP reward client (`verl_omni.utils.reward_score.http_scorer_client`) that sends generated images to an external scorer service over HTTP and returns the score. This is useful when your reward model is too large to co-locate with training, needs a different runtime (e.g., a separate GPU pool), or is shared across multiple experiments.
 

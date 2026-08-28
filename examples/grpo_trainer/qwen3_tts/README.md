@@ -12,41 +12,22 @@ The launcher follows the V1 omni-model integration guide: it calls
 `verl_omni.trainer.main_omni` and expresses the recipe as CLI overrides on the
 standard `omni_trainer` config, without a model-specific Trainer or config tree.
 
-SpeechJudge-BTRM is one possible scorer. It runs behind the generic audio HTTP
-client because its published Transformers environment conflicts with the
-Transformers 5.x vLLM stack. The Trainer and `AudioRewardManager` do not contain
-SpeechJudge-specific branches, candidate masks, ASR gates, or custom losses.
+SpeechJudge-BTRM is one possible pointwise scorer. SpeechJudge's published vLLM
+entry point targets the pairwise generative GRM, while BTRM uses a scalar reward
+head with Transformers. This example therefore keeps reward inference behind the
+generic audio HTTP protocol instead of adding a SpeechJudge-specific Trainer
+path. The scorer may run in a separate environment from the Transformers 5.x
+vLLM training stack.
 
 ## Algorithm background
 
-The rollout and update flow follows the TTS application of GRPO described in
-[Group Relative Policy Optimization for Text-to-Speech with Large Language
-Models](https://arxiv.org/abs/2509.18798): sample a group of speech-token
-trajectories for each text prompt, decode every trajectory to a waveform,
-compute scalar audio rewards, derive group-relative advantages, and replay the
-sampled policy tokens for the GRPO update with an optional reference-model KL
-penalty. That paper uses a specific ASR-based CER-and-NLL reward. This example
-keeps the same GRPO structure but intentionally places reward computation behind
-the generic audio HTTP protocol, so it is an integration of the paper-supported
-algorithm rather than an exact reproduction of its reward function or recipe.
-
-The policy boundary follows the released Qwen3-TTS architecture. The
-[Qwen3-TTS Technical Report](https://arxiv.org/abs/2601.15621) describes the
-12 Hz tokenizer as a 16-layer multi-codebook representation: the first layer
-captures semantic content, the other 15 RVQ layers add acoustic detail, the
-Talker backbone predicts codec-0, and its MTP module predicts the residual
-codebooks. This example therefore optimizes codec-0 as the policy sequence while
-retaining the complete 16-codebook rollout for actor replay and waveform
-decoding. Here, "teacher-forced" means that the actor replays the tokens sampled
-during rollout as fixed history; it does not mean that ground-truth speech
-tokens are used.
-
-[SpeechAlign](https://arxiv.org/abs/2404.05600) is a related multi-codebook
-speech-alignment precedent: its autoregressive model generates the first of
-eight RVQ codebooks and a pretrained non-autoregressive model supplies the
-remaining layers. It supports treating the first codebook as the optimized
-sequence while preserving residual acoustic codebooks, but it uses preference
-optimization rather than the GRPO objective implemented here.
+This recipe applies the paper's TTS GRPO flow to Qwen3-TTS: grouped codec-token
+rollouts are decoded, scored, converted to group-relative advantages, and
+replayed with optional reference KL. It optimizes codec-0, the autoregressive
+policy sequence described by the Qwen3-TTS architecture, while retaining all 16
+codebooks for replay and waveform decoding. The HTTP scorer is configurable, so
+this is not an exact reproduction of the paper's CER-and-NLL reward. See the
+references below for the algorithm and multi-codebook design details.
 
 ## Install
 
@@ -110,8 +91,11 @@ For SpeechJudge-BTRM, deploy the official
 [`AmphionTeam/SpeechJudge`](https://github.com/AmphionTeam/SpeechJudge) code and
 [`RMSnow/SpeechJudge-BTRM`](https://huggingface.co/RMSnow/SpeechJudge-BTRM)
 checkpoint in a separate environment, then expose its pointwise score through
-this protocol. Pin the SpeechJudge source revision and runtime versions in the
-service deployment. SpeechJudge-BTRM is licensed CC-BY-NC-4.0.
+this protocol. The official [`main_grm_vllm.py`](https://github.com/AmphionTeam/SpeechJudge/blob/master/infer/main_grm_vllm.py)
+runs a different, pairwise generative GRM path; the BTRM entry point is
+[`main_btrm.py`](https://github.com/AmphionTeam/SpeechJudge/blob/master/infer/main_btrm.py).
+Pin the SpeechJudge source revision and runtime versions in the service
+deployment. SpeechJudge-BTRM is licensed CC-BY-NC-4.0.
 
 ## Train
 
@@ -139,16 +123,21 @@ investigation.
 For a two-update implementation smoke test:
 
 ```bash
-TOTAL_TRAINING_STEPS=2 TEST_FREQ=-1 SAVE_FREQ=1 RESUME_MODE=disable \
+TOTAL_TRAINING_STEPS=2 TEST_FREQ=-1 SAVE_FREQ=-1 RESUME_MODE=disable \
 OUTPUT_DIR=outputs/qwen3_tts_grpo_smoke \
 bash examples/grpo_trainer/qwen3_tts/run_qwen3_tts_grpo.sh \
   trainer.val_before_train=false trainer.log_val_generations=0
 ```
 
-This smoke proves rollout, finite audio reward, optimizer update, weight sync,
-and checkpoint wiring only. It is not evidence that GRPO improves held-out
+This smoke proves rollout, finite audio reward, optimizer update, and
+post-update weight sync only. It is not evidence that GRPO improves held-out
 speech quality; that requires the complete fixed-validation curve and paired
 human listening evaluation.
+
+The CI-oriented wrapper at
+[`tests/special_e2e/run_qwen3_tts_grpo_smoke.sh`](../../../tests/special_e2e/run_qwen3_tts_grpo_smoke.sh)
+creates deterministic fixtures, starts a duration-only test scorer, and runs two
+updates with the official 0.6B Base model.
 
 ## References
 

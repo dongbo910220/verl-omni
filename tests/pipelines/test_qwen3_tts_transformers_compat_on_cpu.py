@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from packaging.version import Version
 
 ROOT = Path(__file__).parents[2]
 
@@ -35,15 +34,17 @@ def _load_compat_module():
 
 def test_qwen_tts_tiny_model_constructs_and_forwards_without_source_patch():
     transformers = pytest.importorskip("transformers")
-    if Version(transformers.__version__).major < 5:
-        pytest.skip("Transformers 5.x compatibility test")
+    assert int(transformers.__version__.split(".", maxsplit=1)[0]) >= 5
     if importlib.util.find_spec("qwen_tts") is None:
         pytest.skip("qwen-tts is an optional dependency")
 
     compat = _load_compat_module()
+    rope_utils = importlib.import_module("transformers.modeling_rope_utils")
+    original_rope_functions = rope_utils.ROPE_INIT_FUNCTIONS
     with compat.qwen3_tts_import_context():
         config_module = importlib.import_module("qwen_tts.core.models.configuration_qwen3_tts")
         model_module = importlib.import_module("qwen_tts.core.models.modeling_qwen3_tts")
+    assert rope_utils.ROPE_INIT_FUNCTIONS is original_rope_functions
     compat.patch_qwen3_tts_config_defaults(config_module.Qwen3TTSConfig)
 
     predictor = {

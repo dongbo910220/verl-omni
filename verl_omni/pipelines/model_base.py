@@ -491,6 +491,7 @@ class OmniModelBase(ABC):
     """
 
     _registry: dict[tuple[str, str], type["OmniModelBase"]] = {}
+    disable_reference_cpu_offload = False
 
     @classmethod
     def register(cls, architecture: str, stage: str = "thinker"):
@@ -557,6 +558,28 @@ class OmniModelBase(ABC):
                 f"stage={stage!r}). Registered: {registered}. "
                 f"Set ``external_lib`` to load your training adapter."
             ) from None
+
+    @classmethod
+    def load_hf_config(
+        cls,
+        model_path: str,
+        *,
+        trust_remote_code: bool,
+        attn_implementation: str,
+    ):
+        """Load the Hugging Face config used by the FSDP engine."""
+        from transformers import AutoConfig
+
+        return AutoConfig.from_pretrained(
+            model_path,
+            trust_remote_code=trust_remote_code,
+            attn_implementation=attn_implementation,
+        )
+
+    @classmethod
+    def get_model_class(cls):
+        """Return a model class override, or ``None`` for the default auto model."""
+        return None
 
     @classmethod
     @abstractmethod
@@ -627,7 +650,6 @@ class OmniModelBase(ABC):
         Default implementation strips the submodules returned by
         ``get_strip_modules``.  Override to also:
 
-        - Register the model class with ``AutoModelForCausalLM``.
         - Redirect ``forward()`` and embedding accessors to the
           trainable sub-component.
         - Force ``tie_word_embeddings=False`` for FSDP compatibility.
@@ -762,11 +784,6 @@ class OmniRolloutPipelineBase:
     def weight_sync_stage_ids(cls, pipeline_mode="thinker_only") -> list[int] | None:
         """Return stages that receive actor weights, or all stages by default."""
         return None
-
-    @classmethod
-    def supports_cache_engine_sleep(cls, pipeline_mode="thinker_only") -> bool:
-        """Return whether the pipeline supports rollout cache sleep and wake."""
-        return True
 
     @classmethod
     def get_pipeline_id(cls, pipeline_mode: str = "thinker_only") -> str:

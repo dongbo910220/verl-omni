@@ -42,43 +42,6 @@ def _prepare_config_for_checkpoint(config) -> None:
         speaker_config.__dict__.pop("_dtype", None)
 
 
-def register_qwen3_tts_automodel() -> None:
-    config_cls = model_cls = None
-    with qwen3_tts_import_context():
-        for module_name in ("transformers", "qwen_tts.core.models.configuration_qwen3_tts"):
-            try:
-                config_cls = getattr(__import__(module_name, fromlist=["Qwen3TTSConfig"]), "Qwen3TTSConfig", None)
-            except ImportError:
-                continue
-            if config_cls is not None:
-                break
-        for module_name in ("transformers", "qwen_tts.core.models.modeling_qwen3_tts"):
-            try:
-                model_cls = getattr(
-                    __import__(module_name, fromlist=["Qwen3TTSForConditionalGeneration"]),
-                    "Qwen3TTSForConditionalGeneration",
-                    None,
-                )
-            except ImportError:
-                continue
-            if model_cls is not None:
-                break
-    if config_cls is None or model_cls is None:
-        return
-
-    from transformers import AutoConfig, AutoModelForMultimodalLM
-
-    patch_qwen3_tts_config_defaults(config_cls)
-    try:
-        AutoConfig.register(getattr(config_cls, "model_type", "qwen3_tts"), config_cls)
-    except ValueError:
-        pass
-    try:
-        AutoModelForMultimodalLM.register(config_cls, model_cls)
-    except ValueError:
-        pass
-
-
 def _speaker_embedding(model, batch_size, device, dtype):
     cached = getattr(model, "_verl_tts_speaker_embedding", None)
     if cached is None:
@@ -145,7 +108,26 @@ def _set_input_embeddings(self, value):
 
 @OmniModelBase.register("Qwen3TTSForConditionalGeneration", stage="talker")
 class Qwen3TTSTalkerAdapter(OmniModelBase):
-    requires_manual_ref_offload = True
+    disable_reference_cpu_offload = True
+
+    @classmethod
+    def load_hf_config(cls, model_path, *, trust_remote_code, attn_implementation):
+        with qwen3_tts_import_context():
+            from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSConfig
+
+        patch_qwen3_tts_config_defaults(Qwen3TTSConfig)
+        return Qwen3TTSConfig.from_pretrained(
+            model_path,
+            trust_remote_code=trust_remote_code,
+            attn_implementation=attn_implementation,
+        )
+
+    @classmethod
+    def get_model_class(cls):
+        with qwen3_tts_import_context():
+            from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSForConditionalGeneration
+
+        return Qwen3TTSForConditionalGeneration
 
     @classmethod
     def get_strip_modules(cls, model_config):
@@ -227,6 +209,3 @@ class Qwen3TTSTalkerAdapter(OmniModelBase):
             }
         )
         return model_inputs
-
-
-register_qwen3_tts_automodel()

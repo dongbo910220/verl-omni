@@ -375,20 +375,20 @@ def test_collect_lora_params_import_not_from_verl():
 
 
 # ---------------------------------------------------------------------------
-# Qwen3-TTS reference-policy manual offload
+# Qwen3-TTS reference-policy CPU-offload exception
 # ---------------------------------------------------------------------------
 
 
-def _make_manual_ref_engine(omni_impl, *, enabled=True):
+def _make_reference_engine(omni_impl, *, disable_cpu_offload=True):
     engine = object.__new__(omni_impl.OmniFSDPEngine)
     engine.engine_config = types.SimpleNamespace(forward_only=True, param_offload=False)
-    engine.model_adapter_cls = types.SimpleNamespace(requires_manual_ref_offload=enabled)
+    engine.model_adapter_cls = types.SimpleNamespace(disable_reference_cpu_offload=disable_cpu_offload)
     return engine
 
 
 def test_tts_ref_build_disables_forced_fsdp_cpu_offload_temporarily():
     omni_impl = _get_omni_impl_module()
-    engine = _make_manual_ref_engine(omni_impl)
+    engine = _make_reference_engine(omni_impl)
     observed = []
 
     def fake_build(module):
@@ -403,9 +403,9 @@ def test_tts_ref_build_disables_forced_fsdp_cpu_offload_temporarily():
     assert engine.engine_config.forward_only is True
 
 
-def test_tts_ref_to_uses_manual_load_path_and_restores_on_error():
+def test_tts_ref_to_bypasses_forced_offload_and_restores_on_error():
     omni_impl = _get_omni_impl_module()
-    engine = _make_manual_ref_engine(omni_impl)
+    engine = _make_reference_engine(omni_impl)
     observed = []
 
     def fake_to(*args, **kwargs):
@@ -424,7 +424,7 @@ def test_tts_ref_to_uses_manual_load_path_and_restores_on_error():
 
 def test_non_tts_ref_keeps_standard_forward_only_path():
     omni_impl = _get_omni_impl_module()
-    engine = _make_manual_ref_engine(omni_impl, enabled=False)
+    engine = _make_reference_engine(omni_impl, disable_cpu_offload=False)
     observed = []
 
     def fake_build(module):
@@ -469,6 +469,7 @@ def test_build_module_calls_adapter_configure_model(architecture):
     fake_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
 
     fake_adapter_cls = MagicMock()
+    fake_adapter_cls.get_model_class.return_value = None
     fake_configured_module = MagicMock(spec=torch.nn.Module)
     fake_configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
     fake_adapter_cls.configure_model.return_value = fake_configured_module
@@ -482,8 +483,9 @@ def test_build_module_calls_adapter_configure_model(architecture):
         patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=fake_adapter_cls) as mock_get_cls,
         patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
         patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
-        patch("verl.utils.torch_dtypes.PrecisionType"),
+        patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
     ):
+        precision_type.to_dtype.side_effect = lambda value: value
         engine = object.__new__(omni_impl.OmniFSDPEngine)
         engine.model_config = model_config
         engine.engine_config = MagicMock()
@@ -506,7 +508,47 @@ def test_build_module_calls_adapter_configure_model(architecture):
         )
 
         fake_adapter_cls.configure_model.assert_called_once_with(fake_module, model_config)
+        assert engine.model_adapter_cls is fake_adapter_cls
         assert result is fake_configured_module
+
+
+def test_build_module_uses_adapter_model_class_when_auto_model_is_incompatible():
+    omni_impl = _get_omni_impl_module()
+    model_config = _make_mock_model_config(architecture="CustomOmniForConditionalGeneration")
+    loaded_module = MagicMock(spec=torch.nn.Module)
+    loaded_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
+    configured_module = MagicMock(spec=torch.nn.Module)
+    configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
+    adapter_cls = MagicMock()
+    custom_model_cls = MagicMock()
+    custom_model_cls.from_pretrained.return_value = loaded_module
+    adapter_cls.get_model_class.return_value = custom_model_cls
+    adapter_cls.configure_model.return_value = configured_module
+    model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
+
+    with (
+        patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
+        patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
+        patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
+        patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
+    ):
+        precision_type.to_dtype.side_effect = lambda value: value
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.model_config = model_config
+        engine.engine_config = MagicMock(model_dtype=None, forward_only=False)
+        engine.device_mesh = None
+
+        result = engine._build_module()
+
+    adapter_cls.get_model_class.assert_called_once_with()
+    custom_model_cls.from_pretrained.assert_called_once_with(
+        pretrained_model_name_or_path=model_config.local_path,
+        torch_dtype=torch.float32,
+        config=model_config.hf_config,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    adapter_cls.configure_model.assert_called_once_with(loaded_module, model_config)
+    assert result is configured_module
 
 
 @pytest.mark.parametrize("option", ["use_liger", "use_fused_kernels"])

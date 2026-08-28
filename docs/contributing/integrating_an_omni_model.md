@@ -60,6 +60,13 @@ adapt each implementation to your model's architecture:
   `module._no_split_modules` to the correct decoder layer class for FSDP.
   This method runs before FSDP wrapping and LoRA injection.
 
+- **`load_hf_config(...)` and `get_model_class()`** (optional): Override these
+  only when the architecture is not supported by `AutoConfig` or
+  `AutoModelForMultimodalLM`. Returning `None` from `get_model_class` keeps the
+  default auto-model path. The FSDP engine still owns `from_pretrained`;
+  Qwen3-TTS selects the config and model classes published by `qwen-tts`
+  directly instead of registering them globally with Transformers.
+
 - **`prepare_model_inputs(model_inputs, micro_batch, model_config)`**
   (optional): Validate model-native trajectory or conditioning data retained by
   rollout and add it to the actor forward inputs. Per-sample rollout data starts
@@ -99,11 +106,11 @@ Optional overrides fall into four groups:
 
 - Pipeline setup: `ensure_pipeline_registered`, `get_engine_hf_overrides`, and
   `get_stage_engine_extras`.
-- Resource behavior: `weight_sync_stage_ids` and
-  `supports_cache_engine_sleep`.
+- Resource behavior: `weight_sync_stage_ids`.
 - Request construction: `prepare_engine_prompt`.
-- Multi-stage output retention: `get_output_modalities` and
-  `combine_engine_outputs`.
+- Multi-stage output assembly: `combine_engine_outputs`. The rollout server
+  derives retained output modalities from stages marked `final_output` in the
+  pipeline topology.
 
 Their defaults preserve the existing single-output AR behavior. Override only
 the hooks required by the model. For example, Qwen3-TTS synchronizes actor

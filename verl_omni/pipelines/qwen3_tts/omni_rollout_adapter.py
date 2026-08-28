@@ -61,16 +61,17 @@ def _completion(output):
     return completions[0] if completions else None
 
 
-def _materialize(value):
+def _copy_plain_containers(value):
+    """Copy Ray/shared-memory mapping containers without copying tensor payloads."""
     if isinstance(value, Mapping):
-        return {key: _materialize(item) for key, item in value.items()}
+        return {key: _copy_plain_containers(item) for key, item in value.items()}
     if isinstance(value, list):
-        return [_materialize(item) for item in value]
+        return [_copy_plain_containers(item) for item in value]
     return value
 
 
 def talker2code2wav_token_only(source_outputs, prompt=None, _requires_multimodal_data=False):
-    """Materialize shared-memory Mapping payloads before the upstream processor mutates them."""
+    """Give the mutating upstream processor ordinary Python containers."""
     from vllm_omni.model_executor.stage_input_processors.qwen3_tts import (
         talker2code2wav_token_only as upstream_processor,
     )
@@ -83,7 +84,7 @@ def talker2code2wav_token_only(source_outputs, prompt=None, _requires_multimodal
             completion_copy = copy.copy(completion)
             multimodal = getattr(completion, "multimodal_output", None)
             if isinstance(multimodal, Mapping):
-                completion_copy.multimodal_output = _materialize(multimodal)
+                completion_copy.multimodal_output = _copy_plain_containers(multimodal)
             source_copy.outputs.append(completion_copy)
         converted.append(source_copy)
     return upstream_processor(converted, prompt, _requires_multimodal_data)
@@ -112,19 +113,10 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
         register_pipeline(QWEN3_TTS_RL_PIPELINE)
 
     @classmethod
-    def get_output_modalities(cls, pipeline_mode="full"):
-        cls._check_mode(pipeline_mode)
-        return ["latent", "audio"]
-
-    @classmethod
     def weight_sync_stage_ids(cls, pipeline_mode="full"):
+        """Sync actor weights only to stage 0; stage 1 is the frozen decoder."""
         cls._check_mode(pipeline_mode)
         return [0]
-
-    @classmethod
-    def supports_cache_engine_sleep(cls, pipeline_mode="full"):
-        cls._check_mode(pipeline_mode)
-        return False
 
     @classmethod
     def get_stage_engine_extras(cls, stage_id, pipeline_mode="full"):
@@ -140,6 +132,7 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
         trainer_config,
         agent_inputs,
     ):
+        """Seed codec-0 and residual-codebook sampling for each GRPO candidate."""
         extra_info = agent_inputs.get("extra_info")
         evaluation = is_evaluation_split(extra_info)
         candidate_count = rollout_config.val_kwargs.n if evaluation else rollout_config.n
@@ -155,6 +148,7 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
 
     @classmethod
     def postprocess_agent_loop_output(cls, output, *, tokenizer, response_length):
+        """Map the 16-codebook rollout to codec-0 policy tokens and replay fields."""
         extra = output.extra_fields
         codes, text = extra.get("tts_audio_codes"), extra.get("tts_text")
         if codes is None or text is None:
@@ -185,6 +179,7 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
 
     @classmethod
     def prepare_engine_prompt(cls, prompt_ids, model_config, multi_modal_data, mm_processor_kwargs=None):
+        """Build the Base-task prompt and fixed-speaker conditioning for vLLM-Omni."""
         text = model_config.tokenizer.decode(prompt_ids, skip_special_tokens=True).strip()
         if not text:
             raise ValueError("Qwen3-TTS received an empty text prompt.")
@@ -212,6 +207,7 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
 
     @classmethod
     def combine_engine_outputs(cls, outputs, prompt):
+        """Combine stage-0 policy tokens with codec and waveform outputs."""
         policy_output = None
         policy_length = -1
         audio_codes = waveform = None

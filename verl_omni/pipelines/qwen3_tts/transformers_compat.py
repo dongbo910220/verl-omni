@@ -17,7 +17,6 @@ from contextlib import contextmanager
 from functools import wraps
 
 import torch
-from packaging.version import Version
 
 
 def _default_rope_init(config, device=None, **kwargs):
@@ -52,19 +51,14 @@ def qwen3_tts_import_context():
     qwen-tts modules retain the mask wrappers they import. The global
     Transformers functions are restored immediately afterwards.
     """
-    import transformers
-
-    if Version(transformers.__version__).major < 5:
-        yield
-        return
-
     import transformers.masking_utils as masking_utils
+    import transformers.modeling_rope_utils as rope_utils
     import transformers.utils.generic as generic_utils
-    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
     original_check = generic_utils.check_model_inputs
     original_causal_mask = masking_utils.create_causal_mask
     original_sliding_mask = masking_utils.create_sliding_window_causal_mask
+    original_rope_functions = rope_utils.ROPE_INIT_FUNCTIONS
 
     def compatible_check_model_inputs(func=None):
         return original_check if func is None else original_check(func)
@@ -72,10 +66,11 @@ def qwen3_tts_import_context():
     generic_utils.check_model_inputs = compatible_check_model_inputs
     masking_utils.create_causal_mask = _compatible_mask(original_causal_mask)
     masking_utils.create_sliding_window_causal_mask = _compatible_mask(original_sliding_mask)
-    ROPE_INIT_FUNCTIONS.setdefault("default", _default_rope_init)
+    rope_utils.ROPE_INIT_FUNCTIONS = {**original_rope_functions, "default": _default_rope_init}
     try:
         yield
     finally:
         generic_utils.check_model_inputs = original_check
         masking_utils.create_causal_mask = original_causal_mask
         masking_utils.create_sliding_window_causal_mask = original_sliding_mask
+        rope_utils.ROPE_INIT_FUNCTIONS = original_rope_functions

@@ -31,7 +31,10 @@ from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_tts import omni_rollout_adapter
 from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
 from verl_omni.pipelines.qwen3_tts.talker_training_adapter import Qwen3TTSTalkerAdapter
-from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import (
+    _retained_output_modalities,
+    vLLMOmniHttpServer,
+)
 
 
 class _Tokenizer:
@@ -62,9 +65,7 @@ def test_optional_rollout_hooks_preserve_existing_ar_defaults():
     first, final = object(), object()
 
     assert OmniRolloutPipelineBase.weight_sync_stage_ids() is None
-    assert OmniRolloutPipelineBase.supports_cache_engine_sleep()
     assert OmniRolloutPipelineBase.prepare_engine_prompt([], None, {}) is None
-    assert OmniRolloutPipelineBase.get_output_modalities() is None
     sampling_params = {"temperature": 0.8}
     assert (
         OmniRolloutPipelineBase.prepare_agent_sampling_params(
@@ -169,8 +170,7 @@ def test_rollout_adapter_builds_unique_prompt_and_scopes_weight_sync(tmp_path):
     assert first["additional_information"]["text"] == ["first text"]
     assert first["cache_salt"] != second["cache_salt"]
     assert Qwen3TTSRolloutAdapter.weight_sync_stage_ids("full") == [0]
-    assert not Qwen3TTSRolloutAdapter.supports_cache_engine_sleep("full")
-    assert Qwen3TTSRolloutAdapter.get_output_modalities("full") == ["latent", "audio"]
+    assert _retained_output_modalities(Qwen3TTSRolloutAdapter.build_stage_configs("full")) == ["latent", "audio"]
 
 
 def test_rollout_adapter_requires_speaker_embedding():

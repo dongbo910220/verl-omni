@@ -49,14 +49,23 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             return tensor.to(dtype=torch.bfloat16, non_blocking=True)
         return tensor
 
-    def _run_with_manual_ref_offload(self, call):
+    def _run_without_forced_reference_cpu_offload(self, call):
+        """Bypass verl's forced reference CPU offload for adapters that require it.
+
+        Qwen3-TTS invokes leaf embedding tables outside their wrapped decoder
+        module. FSDP1's forced ``CPUOffload`` leaves those tables on CPU while
+        the replay tensors are on CUDA, so reference log-probability computation
+        fails with a device mismatch. Temporarily presenting the reference as a
+        regular engine during FSDP construction and movement keeps the full
+        module on CUDA; it does not enable gradients for the reference model.
+        """
         adapter_cls = getattr(self, "model_adapter_cls", None)
-        manual_ref_offload = (
-            getattr(adapter_cls, "requires_manual_ref_offload", False)
+        disable_cpu_offload = (
+            getattr(adapter_cls, "disable_reference_cpu_offload", False)
             and getattr(self.engine_config, "forward_only", False)
             and not getattr(self.engine_config, "param_offload", True)
         )
-        if not manual_ref_offload:
+        if not disable_cpu_offload:
             return call()
 
         self.engine_config.forward_only = False
@@ -67,11 +76,13 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
     def _build_fsdp_module(self, module):
         parent_build = super()._build_fsdp_module
-        return self._run_with_manual_ref_offload(lambda: parent_build(module))
+        return self._run_without_forced_reference_cpu_offload(lambda: parent_build(module))
 
     def to(self, device, model=True, optimizer=True, grad=True):
         parent_to = super().to
-        return self._run_with_manual_ref_offload(lambda: parent_to(device, model=model, optimizer=optimizer, grad=grad))
+        return self._run_without_forced_reference_cpu_offload(
+            lambda: parent_to(device, model=model, optimizer=optimizer, grad=grad)
+        )
 
     def prepare_model_inputs(self, micro_batch):
         """Prepare standard LM inputs, then add model-native replay fields."""
@@ -200,6 +211,12 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         self.model_config: OmniModelConfig
         architecture = self.model_config.architecture
+        adapter_cls = OmniModelBase.get_class_by_name(
+            architecture,
+            self.model_config.model_stage,
+            self.model_config.get("external_lib"),
+        )
+        self.model_adapter_cls = adapter_cls
 
         torch_dtype = self.engine_config.model_dtype
 
@@ -221,19 +238,13 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            module = AutoModelForMultimodalLM.from_pretrained(
+            model_cls = adapter_cls.get_model_class() or AutoModelForMultimodalLM
+            module = model_cls.from_pretrained(
                 pretrained_model_name_or_path=self.model_config.local_path,
                 torch_dtype=torch_dtype,
                 config=self.model_config.hf_config,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
-
-            adapter_cls = OmniModelBase.get_class_by_name(
-                architecture,
-                self.model_config.model_stage,
-                self.model_config.get("external_lib"),
-            )
-            self.model_adapter_cls = adapter_cls
             module = adapter_cls.configure_model(module, self.model_config)
 
             module.to(torch_dtype)

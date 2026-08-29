@@ -62,7 +62,10 @@ def _completion(output):
 
 
 def _copy_plain_containers(value):
-    """Copy Ray/shared-memory mapping containers without copying tensor payloads."""
+    """Convert Ray/shared-memory Mapping/list shells to built-ins for upstream strict dict checks.
+
+    Tensor payloads are preserved rather than copied.
+    """
     if isinstance(value, Mapping):
         return {key: _copy_plain_containers(item) for key, item in value.items()}
     if isinstance(value, list):

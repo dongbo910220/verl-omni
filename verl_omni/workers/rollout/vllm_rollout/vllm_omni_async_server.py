@@ -178,11 +178,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
-        if self._omni_rollout_adapter is not None:
-            await self._omni_rollout_adapter.initialize_rollout_workers(
-                engine_client,
-                self._omni_pipeline_mode,
-            )
 
         # Deploy config YAML is consumed by AsyncOmni above; clean up the temp dir.
         if getattr(self, "_temp_deploy_ctx", None) is not None:
@@ -196,6 +191,22 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """Run headless server in a separate thread."""
         # TODO (mike): support multi node
         raise NotImplementedError("vLLM-Omni headless mode is not implemented yet.")
+
+    async def collective_rpc(
+        self,
+        method: Any,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict[str, Any] | None = None,
+    ):
+        """Dispatch a shared RPC to the stages selected by the active strategy."""
+        return await self.engine.collective_rpc(
+            method=method,
+            timeout=timeout,
+            args=args,
+            kwargs=kwargs,
+            stage_ids=self._generate_strategy.collective_rpc_stage_ids(method),
+        )
 
     # -----------------------------------------------------------------------
     # wake_up hook: Omni does not restore KV cache on wake-up

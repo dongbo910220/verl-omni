@@ -108,9 +108,9 @@ Optional overrides fall into four groups:
   `get_stage_engine_extras`.
 - Resource behavior: `weight_sync_stage_ids`.
 - Request construction: `prepare_engine_prompt`.
-- Multi-stage output assembly: `combine_engine_outputs`. The rollout server
-  derives retained output modalities from stages marked `final_output` in the
-  pipeline topology.
+- Multi-stage output assembly: `combine_engine_outputs`. The AR generation
+  strategy derives retained output modalities from stages marked
+  `final_output` in the pipeline topology.
 
 Their defaults preserve the existing single-output AR behavior. Override only
 the hooks required by the model. For example, Qwen3-TTS synchronizes actor

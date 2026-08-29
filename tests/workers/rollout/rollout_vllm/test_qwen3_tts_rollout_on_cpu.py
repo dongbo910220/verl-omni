@@ -31,10 +31,11 @@ from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_tts import omni_rollout_adapter
 from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
 from verl_omni.pipelines.qwen3_tts.talker_training_adapter import Qwen3TTSTalkerAdapter
-from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import (
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import (
+    ARStrategy,
     _retained_output_modalities,
-    vLLMOmniHttpServer,
 )
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
 
 class _Tokenizer:
@@ -173,6 +174,31 @@ def test_rollout_adapter_builds_unique_prompt_and_scopes_weight_sync(tmp_path):
     assert _retained_output_modalities(Qwen3TTSRolloutAdapter.build_stage_configs("full")) == ["latent", "audio"]
 
 
+def test_ar_strategy_resolves_qwen3_tts_adapter_and_scopes_weight_sync(monkeypatch):
+    server = SimpleNamespace(_rollout_flags={})
+    strategy = ARStrategy(server)
+    deploy_calls = []
+    monkeypatch.setattr(
+        strategy,
+        "_write_deploy_config",
+        lambda engine_kwargs, pipeline_name, adapter_cls, pipeline_mode: deploy_calls.append(
+            (pipeline_name, adapter_cls, pipeline_mode)
+        ),
+    )
+    engine_kwargs = {
+        "output_mode": "ar",
+        "pipeline_name": "qwen3_tts_rl",
+        "pipeline_mode": "full",
+    }
+
+    strategy.preprocess_engine_kwargs(engine_kwargs)
+
+    assert deploy_calls == [("qwen3_tts_rl", Qwen3TTSRolloutAdapter, "full")]
+    assert strategy._rollout_adapter is Qwen3TTSRolloutAdapter
+    assert strategy._weight_sync_stage_ids == [0]
+    assert engine_kwargs == {}
+
+
 def test_rollout_adapter_requires_speaker_embedding():
     model_config = SimpleNamespace(
         tokenizer=_Tokenizer(),
@@ -276,7 +302,7 @@ def test_rollout_adapter_prepares_sampling_and_actor_policy_sequence():
     assert result.extra_fields["tts_text_ids"]
 
 
-def test_server_prepares_stage_specific_sampling_params():
+def test_ar_strategy_prepares_stage_specific_sampling_params():
     class Adapter:
         @staticmethod
         def prepare_engine_prompt(**kwargs):
@@ -285,20 +311,21 @@ def test_server_prepares_stage_specific_sampling_params():
                 "additional_information": {"text": ["hello"]},
             }
 
-    server = object.__new__(vLLMOmniHttpServer)
-    server._ar_mode = True
-    server._omni_rollout_adapter = Adapter
-    server._stage_sampling_constraints = {0: {}}
-    server.model_config = SimpleNamespace()
-    server.config = SimpleNamespace(
-        max_model_len=64,
-        prompt_length=16,
-        response_length=8,
-        repetition_penalty=1.0,
+    server = SimpleNamespace(
+        model_config=SimpleNamespace(),
+        config=SimpleNamespace(
+            max_model_len=64,
+            prompt_length=16,
+            response_length=8,
+            repetition_penalty=1.0,
+        ),
+        engine=SimpleNamespace(default_sampling_params_list=[SamplingParams(), SimpleNamespace(stage="decoder")]),
     )
-    server.engine = SimpleNamespace(default_sampling_params_list=[SamplingParams(), SimpleNamespace(stage="decoder")])
+    strategy = ARStrategy(server)
+    strategy._rollout_adapter = Adapter
+    strategy._stage_sampling_constraints = {0: {}}
 
-    prompt, params = server._preprocess_input(
+    prompt, params = strategy.preprocess_input(
         [5, 6],
         {"temperature": 0.8, "logprobs": True},
         {},
@@ -315,7 +342,7 @@ def test_server_prepares_stage_specific_sampling_params():
 
 
 @pytest.mark.asyncio
-async def test_server_retains_requested_stage_outputs_and_targets_weight_sync():
+async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sync():
     policy = SimpleNamespace(request_output=SimpleNamespace(outputs=[]))
 
     class Engine:
@@ -338,13 +365,14 @@ async def test_server_retains_requested_stage_outputs_and_targets_weight_sync():
             return policy, {"audio_sample_rate": 24_000}
 
     server = object.__new__(vLLMOmniHttpServer)
-    server._ar_mode = True
     server.engine = Engine()
-    server._rollout_output_modalities = ["latent", "audio"]
-    server._omni_rollout_adapter = Adapter
-    server._weight_sync_stage_ids = [0]
+    strategy = ARStrategy(server)
+    strategy._rollout_output_modalities = ["latent", "audio"]
+    strategy._rollout_adapter = Adapter
+    strategy._weight_sync_stage_ids = [0]
+    server._generate_strategy = strategy
 
-    result = await server._run_generation({"prompt_token_ids": [1]}, SamplingParams(), "request-0", None, 0)
+    result = await strategy.run_generation({"prompt_token_ids": [1]}, SamplingParams(), "request-0", None, 0)
     rpc_result = await server.collective_rpc("update_weights_from_ipc", kwargs={"base_sync_done": True})
 
     assert result is policy

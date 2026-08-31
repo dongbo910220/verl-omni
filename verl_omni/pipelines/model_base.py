@@ -559,26 +559,9 @@ class OmniModelBase(ABC):
             ) from None
 
     @classmethod
-    def load_hf_config(
-        cls,
-        model_path: str,
-        *,
-        trust_remote_code: bool,
-        attn_implementation: str,
-    ):
-        """Load the Hugging Face config used by the FSDP engine."""
-        from transformers import AutoConfig
-
-        return AutoConfig.from_pretrained(
-            model_path,
-            trust_remote_code=trust_remote_code,
-            attn_implementation=attn_implementation,
-        )
-
-    @classmethod
-    def get_model_class(cls):
-        """Return a model class override, or ``None`` for the default auto model."""
-        return None
+    def register_auto_classes(cls) -> None:
+        """Register optional model-package classes with Transformers auto APIs."""
+        return
 
     @classmethod
     @abstractmethod
@@ -802,7 +785,7 @@ class OmniRolloutPipelineBase:
         for model_type, cls_ref in cls._registry.items():
             if cls_ref is cls:
                 return model_type
-        return ""
+        raise RuntimeError(f"{cls.__name__} is not registered as an omni rollout pipeline.")
 
     @classmethod
     def ensure_pipeline_registered(cls, pipeline_mode: str = "thinker_only") -> None:
@@ -858,4 +841,6 @@ class OmniRolloutPipelineBase:
     @classmethod
     def combine_engine_outputs(cls, outputs: list, prompt: dict) -> tuple[Any, dict[str, Any]]:
         """Select the policy output and collect architecture-specific fields."""
-        return (outputs[-1] if outputs else None), {}
+        if not outputs:
+            raise RuntimeError("The omni rollout engine returned no outputs.")
+        return outputs[-1], {}

@@ -150,19 +150,13 @@ def test_missing_sample_rate_fails_closed():
         manager.loop.run_until_complete(manager.run_single(data))
 
 
-def test_list_of_chunks_is_concatenated():
-    def compute_score(solution_audio, **kwargs):
-        waveform, sample_rate = solution_audio
-        np.testing.assert_array_equal(waveform, np.array([0.1, 0.2, 0.3], dtype=np.float32))
-        assert sample_rate == 16_000
-        return 0.5
+def test_chunked_waveform_is_rejected_instead_of_guessed():
+    manager = _manager(lambda **kwargs: 0.5)
 
-    manager = _manager(compute_score)
-    result = manager.loop.run_until_complete(
-        manager.run_single(_data([torch.tensor([0.1, 0.2]), torch.tensor([0.3])], 16_000))
-    )
-
-    assert result == {"reward_score": 0.5, "reward_extra_info": {"acc": 0.5}}
+    with pytest.raises(ValueError, match="could not convert"):
+        manager.loop.run_until_complete(
+            manager.run_single(_data([torch.tensor([0.1, 0.2]), torch.tensor([0.3])], 16_000))
+        )
 
 
 @pytest.mark.asyncio

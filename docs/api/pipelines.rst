@@ -42,7 +42,7 @@ Model Base
 
 .. autoclass:: verl_omni.pipelines.model_base.OmniModelBase
    :members: register, get_class, get_class_by_name,
-             load_hf_config, get_model_class,
+             register_auto_classes,
              get_strip_modules, configure_processor, configure_tokenizer,
              configure_model, prepare_model_inputs
 
@@ -51,7 +51,7 @@ Model Base
              build_stage_configs, rollout_flags, weight_sync_stage_ids,
              get_pipeline_id, ensure_pipeline_registered, get_engine_hf_overrides,
              get_stage_engine_extras, prepare_engine_prompt,
-             prepare_agent_sampling_params, postprocess_agent_loop_output,
+             postprocess_agent_loop_output,
              combine_engine_outputs
 
 .. autoclass:: verl_omni.pipelines.model_base.DiffusionModelBase

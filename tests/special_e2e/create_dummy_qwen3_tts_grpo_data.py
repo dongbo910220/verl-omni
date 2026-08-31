@@ -38,10 +38,8 @@ VALIDATION_TEXTS = (
 )
 
 
-def _row(text: str, sample_id: str, split: str, generation_seed: int | None = None) -> dict:
+def _row(text: str, sample_id: str, split: str) -> dict:
     extra_info = {"id": sample_id, "split": split}
-    if generation_seed is not None:
-        extra_info["generation_seed"] = generation_seed
     return {
         "data_source": "tts",
         "prompt": [{"role": "user", "content": text}],
@@ -57,9 +55,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     train_rows = [_row(text, f"train-{index}", "train") for index, text in enumerate(TRAIN_TEXTS)]
-    validation_rows = [
-        _row(text, f"validation-{index}", "validation", 1_000 + index) for index, text in enumerate(VALIDATION_TEXTS)
-    ]
+    validation_rows = [_row(text, f"validation-{index}", "validation") for index, text in enumerate(VALIDATION_TEXTS)]
     pd.DataFrame(train_rows).to_parquet(args.output_dir / "train.parquet", index=False)
     pd.DataFrame(validation_rows).to_parquet(args.output_dir / "validation.parquet", index=False)
 

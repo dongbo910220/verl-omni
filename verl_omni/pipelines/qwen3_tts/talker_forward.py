@@ -78,9 +78,17 @@ def build_talker_batch(
     audio_codes,
     tokens,
     *,
+    sub_codebook_vocab: int,
     device=None,
-    sub_codebook_vocab=None,
 ) -> TalkerBatch:
+    if not text_ids or len(text_ids) != len(audio_codes):
+        raise ValueError("Qwen3-TTS teacher forcing requires matching non-empty text and codec batches.")
+    if sub_codebook_vocab <= 0:
+        raise ValueError(f"sub_codebook_vocab must be positive, got {sub_codebook_vocab}.")
+    if any(ids.reshape(-1).numel() < 3 for ids in text_ids):
+        raise ValueError("Qwen3-TTS teacher-forcing text sequences must contain at least three prefix tokens.")
+    if any(codes.ndim != 2 or codes.shape[-1] != NUM_CODEBOOKS for codes in audio_codes):
+        raise ValueError(f"Qwen3-TTS codec codes must have shape (frames, {NUM_CODEBOOKS}).")
     text_lens = [int(ids.reshape(-1).shape[0]) for ids in text_ids]
     codec_lens = [int(codes.shape[0]) for codes in audio_codes]
     speaker_slot = 6
@@ -97,9 +105,8 @@ def build_talker_batch(
     for index, (sample_text, sample_codes) in enumerate(zip(text_ids, audio_codes, strict=True)):
         ids = sample_text.reshape(-1).to(device=device, dtype=torch.long)
         codes = sample_codes.to(device=device, dtype=torch.long)
-        if sub_codebook_vocab is not None:
-            codes = codes.clone()
-            codes[:, 1:].clamp_(0, sub_codebook_vocab - 1)
+        if torch.any((codes[:, 1:] < 0) | (codes[:, 1:] >= sub_codebook_vocab)):
+            raise ValueError("Qwen3-TTS residual codec IDs are outside the code-predictor vocabulary.")
         text_len, codec_len = text_lens[index], codec_lens[index]
 
         input_ids[index, :3, 0] = ids[:3]
@@ -141,7 +148,7 @@ def build_talker_batch(
 
 def require_auto_language(language) -> str:
     """Limit RL training to the prompt layout validated by the actor forward."""
-    normalized = str(language or "Auto").strip()
+    normalized = str(language).strip()
     if normalized.lower() != "auto":
         raise ValueError(
             "Qwen3-TTS RL currently supports only tts_language=Auto; "
@@ -152,9 +159,7 @@ def require_auto_language(language) -> str:
 
 def codec0_input_embeddings(talker, batch: TalkerBatch, speaker_embedding: torch.Tensor) -> torch.Tensor:
     ids = batch.input_ids
-    text_embeddings = talker.model.text_embedding(ids[:, :, 0])
-    if getattr(talker, "text_projection", None) is not None:
-        text_embeddings = talker.text_projection(text_embeddings)
+    text_embeddings = talker.text_projection(talker.model.text_embedding(ids[:, :, 0]))
     codec_embeddings = talker.model.codec_embedding(ids[:, :, 1]) * batch.codec_embedding_mask
     codec_embeddings = codec_embeddings.clone()
     sample_indices = torch.arange(codec_embeddings.shape[0], device=codec_embeddings.device)
@@ -180,10 +185,13 @@ def codec0_logits(talker, batch: TalkerBatch, speaker_embedding: torch.Tensor) -
 
 def mask_codec0_logits(logits: torch.Tensor, codebook_vocab: int, codec_eos_token_id: int) -> torch.Tensor:
     """Match the codec-token vocabulary exposed by the rollout model."""
+    if not 1 < codebook_vocab <= logits.shape[-1]:
+        raise ValueError(f"codebook_vocab must be in [2, {logits.shape[-1]}], got {codebook_vocab}.")
+    if not 0 <= codec_eos_token_id < logits.shape[-1]:
+        raise ValueError(f"codec_eos_token_id must be in [0, {logits.shape[-1]}), got {codec_eos_token_id}.")
     valid = torch.zeros(logits.shape[-1], dtype=torch.bool, device=logits.device)
-    valid[1 : min(codebook_vocab, logits.shape[-1])] = True
-    if 0 <= codec_eos_token_id < logits.shape[-1]:
-        valid[codec_eos_token_id] = True
+    valid[1:codebook_vocab] = True
+    valid[codec_eos_token_id] = True
     return logits.masked_fill(~valid, -1e4)
 
 
@@ -230,13 +238,13 @@ def tts_actor_logits(
         sub_vocab,
         int(model.config.talker_config.codec_eos_token_id),
     )
-    output_vocab = max(logits.shape[-1], int(input_ids.max()) + 1)
+    if int(input_ids.min()) < 0 or int(input_ids.max()) >= logits.shape[-1]:
+        raise ValueError("Qwen3-TTS actor token IDs are outside the codec-0 logit vocabulary.")
+    output_vocab = logits.shape[-1]
     aligned = logits.new_zeros((batch_size, output_len, output_vocab))
     for index, response_start in enumerate(response_starts):
         codec_len = batch.codec_lens[index]
         target = slice(response_start - 1, response_start - 1 + codec_len)
-        if output_vocab > logits.shape[-1]:
-            aligned[index, target, logits.shape[-1] :] = -1e4
         source = batch.logit_start[index]
-        aligned[index, target, : logits.shape[-1]] = logits[index, source : source + codec_len]
+        aligned[index, target] = logits[index, source : source + codec_len]
     return aligned

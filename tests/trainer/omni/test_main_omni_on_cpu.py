@@ -98,10 +98,6 @@ class TestLoadTokenizerAndProcessor:
         from verl_omni.workers.config.omni.model import OmniModelConfig
 
         mock_adapter = MagicMock()
-        mock_adapter.load_hf_config.return_value = SimpleNamespace(
-            tie_word_embeddings=False,
-            architectures=["arch"],
-        )
         mock_adapter.configure_tokenizer.return_value = "tokenizer"
         mock_adapter.configure_processor.return_value = "processor"
         monkeypatch.setattr(
@@ -110,6 +106,11 @@ class TestLoadTokenizerAndProcessor:
         )
         monkeypatch.setattr(model_config_module, "resolve_model_local_dir", lambda path, use_shm=False: str(tmp_path))
         monkeypatch.setattr(model_config_module, "copy_to_local", lambda path, use_shm=False: f"local:{path}")
+        monkeypatch.setattr(
+            model_config_module.AutoConfig,
+            "from_pretrained",
+            lambda *_args, **_kwargs: SimpleNamespace(tie_word_embeddings=False, architectures=["arch"]),
+        )
 
         model_config = OmniModelConfig(
             path=str(tmp_path),
@@ -122,11 +123,7 @@ class TestLoadTokenizerAndProcessor:
 
         assert model_config.tokenizer == "tokenizer"
         assert model_config.processor == "processor"
-        mock_adapter.load_hf_config.assert_called_once_with(
-            "local:" + str(tmp_path),
-            trust_remote_code=False,
-            attn_implementation="flash_attention_2",
-        )
+        mock_adapter.register_auto_classes.assert_called_once_with()
         mock_adapter.configure_tokenizer.assert_called_once_with("local:tokenizer-path", model_config)
         mock_adapter.configure_processor.assert_called_once_with(str(tmp_path), model_config)
 

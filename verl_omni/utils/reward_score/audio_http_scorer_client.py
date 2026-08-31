@@ -21,8 +21,6 @@ from typing import Any
 import aiohttp
 import numpy as np
 
-PROTOCOL_VERSION = "1"
-
 
 class _RetryableHTTPError(RuntimeError):
     pass
@@ -60,12 +58,14 @@ def _serialize_request(solution_audio, ground_truth: str, extra_info: dict | Non
         raise TypeError("Audio HTTP scorer sample rate must be numeric.")
     if not math.isfinite(float(sample_rate)) or float(sample_rate) <= 0 or int(sample_rate) != sample_rate:
         raise ValueError(f"Audio HTTP scorer sample rate must be a positive integer, got {sample_rate!r}.")
+    if not isinstance(ground_truth, str):
+        raise TypeError(f"Audio HTTP scorer prompt must be a string, got {type(ground_truth).__name__}.")
     return {
-        "protocol_version": PROTOCOL_VERSION,
+        "protocol_version": "1",
         "waveform_f32_base64": base64.b64encode(waveform.tobytes()).decode("ascii"),
         "num_samples": int(waveform.size),
         "sample_rate": int(sample_rate),
-        "prompt": str(ground_truth or ""),
+        "prompt": ground_truth,
         "metadata": _scalar_metadata(extra_info),
     }
 

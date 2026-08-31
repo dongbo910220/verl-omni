@@ -60,12 +60,10 @@ adapt each implementation to your model's architecture:
   `module._no_split_modules` to the correct decoder layer class for FSDP.
   This method runs before FSDP wrapping and LoRA injection.
 
-- **`load_hf_config(...)` and `get_model_class()`** (optional): Override these
-  only when the architecture is not supported by `AutoConfig` or
-  `AutoModelForMultimodalLM`. Returning `None` from `get_model_class` keeps the
-  default auto-model path. The FSDP engine still owns `from_pretrained`;
-  Qwen3-TTS selects the config and model classes published by `qwen-tts`
-  directly instead of registering them globally with Transformers.
+- **`register_auto_classes()`** (optional): Register classes supplied by an
+  optional model package with the appropriate Transformers Auto APIs. Qwen3-TTS
+  registers the official `qwen-tts` config and model with `AutoConfig` and
+  `AutoModelForTextToWaveform`; the FSDP engine still owns `from_pretrained`.
 
 - **`prepare_model_inputs(model_inputs, micro_batch, model_config)`**
   (optional): Validate model-native trajectory or conditioning data retained by

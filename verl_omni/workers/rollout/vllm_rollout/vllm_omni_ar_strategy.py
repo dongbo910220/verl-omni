@@ -35,8 +35,6 @@ from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniS
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
-_WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
-
 
 def _drop_none_mapping_values(value: Any) -> Any:
     if isinstance(value, dict):
@@ -44,16 +42,6 @@ def _drop_none_mapping_values(value: Any) -> Any:
     if isinstance(value, list):
         return [_drop_none_mapping_values(item) for item in value]
     return value
-
-
-def _retained_output_modalities(stages: list[Any]) -> list[str] | None:
-    """Request every modality when an AR pipeline exposes multiple final outputs."""
-    final_output_types = [
-        stage.final_output_type
-        for stage in stages
-        if getattr(stage, "final_output", False) and getattr(stage, "final_output_type", None)
-    ]
-    return list(dict.fromkeys(final_output_types)) if len(final_output_types) > 1 else None
 
 
 class ARStrategy(OmniStrategyBase):
@@ -86,7 +74,7 @@ class ARStrategy(OmniStrategyBase):
         return vLLMHttpServer._get_override_generation_config(self.server)
 
     def worker_extension_cls(self, device_type: str) -> str:
-        return _WORKER_EXTENSION
+        return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
 
     def preprocess_engine_kwargs(self, engine_kwargs: dict[str, Any]) -> None:
         super().preprocess_engine_kwargs(engine_kwargs)
@@ -109,8 +97,8 @@ class ARStrategy(OmniStrategyBase):
                 hf_overrides.update(adapter_overrides)
                 engine_kwargs["hf_overrides"] = hf_overrides
 
-        stage_init_timeout = engine_kwargs.get("stage_init_timeout") or engine_kwargs.get("stage-init-timeout")
-        init_timeout = engine_kwargs.get("init_timeout") or engine_kwargs.get("init-timeout")
+        stage_init_timeout = engine_kwargs.get("stage_init_timeout")
+        init_timeout = engine_kwargs.get("init_timeout")
         if stage_init_timeout is not None and init_timeout is None:
             engine_kwargs["init_timeout"] = max(int(stage_init_timeout), 600)
 
@@ -132,10 +120,11 @@ class ARStrategy(OmniStrategyBase):
         adapter_cls.ensure_pipeline_registered(pipeline_mode)
         stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
         pipeline_id = adapter_cls.get_pipeline_id(pipeline_mode)
-        self._rollout_output_modalities = _retained_output_modalities(stages)
-        self._stage_sampling_constraints = {
-            stage.stage_id: dict(getattr(stage, "sampling_constraints", {}) or {}) for stage in stages
-        }
+        final_output_types = [stage.final_output_type for stage in stages if stage.final_output]
+        self._rollout_output_modalities = (
+            list(dict.fromkeys(final_output_types)) if len(final_output_types) > 1 else None
+        )
+        self._stage_sampling_constraints = {stage.stage_id: dict(stage.sampling_constraints) for stage in stages}
         stage_extras = {
             stage.stage_id: dict(adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode))
             for stage in stages
@@ -261,11 +250,11 @@ class ARStrategy(OmniStrategyBase):
             sampling_params["logprobs"] = None
         sampling_params.setdefault("repetition_penalty", getattr(self.server.config, "repetition_penalty", 1.0))
         policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-        engine = getattr(self.server, "engine", None)
-        default_params = list(getattr(engine, "default_sampling_params_list", []) or [])
-        if len(default_params) > 1:
-            params = copy.deepcopy(default_params)
-            constrained = self._stage_sampling_constraints.get(0, {})
+        if self._rollout_adapter is not None:
+            params = copy.deepcopy(self.server.engine.default_sampling_params_list)
+            if len(params) <= 1:
+                raise RuntimeError("An omni rollout adapter requires per-stage sampling parameters.")
+            constrained = self._stage_sampling_constraints[0]
             for field in {"max_tokens", *sampling_params} - constrained.keys():
                 setattr(params[0], field, getattr(policy_params, field))
         else:
@@ -307,10 +296,9 @@ class ARStrategy(OmniStrategyBase):
         async for output in generator:
             outputs.append(output)
         if self._rollout_adapter is None:
-            return outputs[-1] if outputs else None
+            raise RuntimeError("Retaining multiple stage outputs requires a registered rollout adapter.")
         final_res, rollout_fields = self._rollout_adapter.combine_engine_outputs(outputs, prompt)
-        if final_res is not None and rollout_fields:
-            final_res._verl_omni_rollout_fields = rollout_fields
+        final_res._verl_omni_rollout_fields = rollout_fields
         return final_res
 
     def process_output(
@@ -322,23 +310,23 @@ class ARStrategy(OmniStrategyBase):
         if final_res is None:
             raise RuntimeError("AR mode: vLLM-Omni engine yielded no output for the prompt.")
 
-        req_output = getattr(final_res, "request_output", None) or final_res
-        if not req_output.outputs:
+        if not final_res.outputs:
             raise RuntimeError("AR mode expects outputs with token IDs, but got None or empty.")
 
         extra_fields = {"global_steps": self.server.global_steps}
-        extra_fields.update(getattr(final_res, "_verl_omni_rollout_fields", {}))
-        token_ids = req_output.outputs[0].token_ids
+        if self._rollout_adapter is not None:
+            extra_fields.update(final_res._verl_omni_rollout_fields)
+        token_ids = final_res.outputs[0].token_ids
         log_probs = None
         policy_params = params[0] if isinstance(params, list) else params
         if policy_params.logprobs is not None:
             log_probs = [
-                logprobs[token_ids[index]].logprob for index, logprobs in enumerate(req_output.outputs[0].logprobs)
+                logprobs[token_ids[index]].logprob for index, logprobs in enumerate(final_res.outputs[0].logprobs)
             ]
 
-        finish_reason = req_output.outputs[0].finish_reason
+        finish_reason = final_res.outputs[0].finish_reason
         stop_reason = self._map_stop_reason(finish_reason)
-        num_preempted = self._extract_num_preempted(req_output)
+        num_preempted = self._extract_num_preempted(final_res)
 
         return TokenOutput(
             token_ids=token_ids,

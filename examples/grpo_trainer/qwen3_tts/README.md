@@ -1,6 +1,6 @@
 # Qwen3-TTS GRPO with an audio reward
 
-Last updated: 08/28/2026.
+Last updated: 08/31/2026.
 
 This example full-parameter tunes the codec-0 policy of
 `Qwen/Qwen3-TTS-12Hz-0.6B-Base`. It uses verl's stock GRPO advantage,
@@ -37,12 +37,17 @@ Install the engine before the training stack:
 uv pip install -e ".[gpu]" --torch-backend=auto
 uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
 uv pip install -e ".[tts,train,dev]"
-uv pip install qwen-tts==0.1.1 --no-deps
+uv pip install --no-deps \
+  "qwen-tts @ git+https://github.com/QwenLM/Qwen3-TTS.git@00969daa8064e23adc9e5f52cdf20cf247f94159"
 ```
 
-The Qwen3-TTS adapter contains a bounded import compatibility layer for
-`qwen-tts==0.1.1` on the repository's Transformers 5.x stack. It does not edit
-site-packages. The system `sox` executable is also required by qwen-tts.
+The pinned Qwen3-TTS revision is the upstream Transformers 5 support change
+from Qwen3-TTS PR #360. The released `qwen-tts==0.1.1` source targets
+Transformers 4.57 and cannot be imported unchanged on this repository's
+Transformers 5 stack. The adapter registers the upstream config and model with
+`AutoConfig` and `AutoModelForTextToWaveform`; it does not carry a local
+Transformers compatibility layer. The system `sox` executable is also required
+by qwen-tts.
 
 ## Data
 
@@ -58,9 +63,9 @@ Training and validation parquet rows use the normal verl format:
 ```
 
 Use disjoint prompts. The default recipe evaluates the same complete 100-row
-validation parquet at step 0 and every 20 updates. Give validation rows fixed
-`extra_info.generation_seed` values to keep candidate sampling paired across
-checkpoints.
+validation parquet at step 0 and every 20 updates. It uses the rollout engine's
+global seed; model-specific per-request seed derivation is intentionally outside
+this integration.
 
 The concatenated replay layout also requires one fixed speaker embedding JSON.
 Generate it once with the official Qwen3-TTS Base model's
@@ -136,8 +141,8 @@ human listening evaluation.
 
 The CI-oriented wrapper at
 [`tests/special_e2e/run_qwen3_tts_grpo_smoke.sh`](../../../tests/special_e2e/run_qwen3_tts_grpo_smoke.sh)
-creates deterministic fixtures, starts a duration-only test scorer, and runs two
-updates with the official 0.6B Base model.
+creates deterministic fixtures, uses an in-process CPU duration reward, and runs
+two updates with the official 0.6B Base model.
 
 ## References
 
@@ -146,5 +151,7 @@ updates with the official 0.6B Base model.
   Models](https://arxiv.org/abs/2509.18798), 2025.
 - Hangrui Hu et al. [Qwen3-TTS Technical
   Report](https://arxiv.org/abs/2601.15621), 2026.
+- QwenLM. [Qwen3-TTS PR #360: Support Transformers
+  5](https://github.com/QwenLM/Qwen3-TTS/pull/360), 2026.
 - Dong Zhang et al. [SpeechAlign: Aligning Speech Generation to Human
   Preferences](https://arxiv.org/abs/2404.05600), 2024.

@@ -18,7 +18,7 @@ import warnings
 
 import torch
 from torch.distributed.tensor import DTensor
-from transformers import AutoModelForMultimodalLM
+from transformers import AutoModelForMultimodalLM, AutoModelForTextToWaveform
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id
 from verl.utils.fsdp_utils import (
@@ -179,7 +179,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         adapter_cls = OmniModelBase.get_class_by_name(
             architecture,
             self.model_config.model_stage,
-            self.model_config.get("external_lib"),
+            self.model_config.external_lib,
         )
         self.model_adapter_cls = adapter_cls
 
@@ -203,8 +203,10 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            model_cls = adapter_cls.get_model_class() or AutoModelForMultimodalLM
-            module = model_cls.from_pretrained(
+            auto_model_cls = (
+                AutoModelForTextToWaveform if self.model_config.model_stage == "talker" else AutoModelForMultimodalLM
+            )
+            module = auto_model_cls.from_pretrained(
                 pretrained_model_name_or_path=self.model_config.local_path,
                 torch_dtype=torch_dtype,
                 config=self.model_config.hf_config,

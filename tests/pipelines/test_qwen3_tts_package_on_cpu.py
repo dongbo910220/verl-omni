@@ -11,41 +11,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Optional real-package check for qwen-tts on the repository TF5 stack."""
+"""Check the pinned upstream qwen-tts TF5 source on the repository stack."""
 
-import importlib
 import importlib.util
-from pathlib import Path
 
 import pytest
 import torch
 
-ROOT = Path(__file__).parents[2]
 
-
-def _load_compat_module():
-    path = ROOT / "verl_omni/pipelines/qwen3_tts/transformers_compat.py"
-    spec = importlib.util.spec_from_file_location("qwen3_tts_transformers_compat_under_test", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_qwen_tts_tiny_model_constructs_and_forwards_without_source_patch():
+def test_qwen_tts_registers_and_runs_without_a_transformers_compatibility_layer():
     transformers = pytest.importorskip("transformers")
-    assert int(transformers.__version__.split(".", maxsplit=1)[0]) >= 5
     if importlib.util.find_spec("qwen_tts") is None:
         pytest.skip("qwen-tts is an optional dependency")
 
-    compat = _load_compat_module()
-    rope_utils = importlib.import_module("transformers.modeling_rope_utils")
-    original_rope_functions = rope_utils.ROPE_INIT_FUNCTIONS
-    with compat.qwen3_tts_import_context():
-        config_module = importlib.import_module("qwen_tts.core.models.configuration_qwen3_tts")
-        model_module = importlib.import_module("qwen_tts.core.models.modeling_qwen3_tts")
-    assert rope_utils.ROPE_INIT_FUNCTIONS is original_rope_functions
-    compat.patch_qwen3_tts_config_defaults(config_module.Qwen3TTSConfig)
+    from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSConfig
+    from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSForConditionalGeneration
+    from transformers import AutoConfig, AutoModelForTextToWaveform
+
+    assert int(transformers.__version__.split(".", maxsplit=1)[0]) >= 5
+    AutoConfig.register("qwen3_tts", Qwen3TTSConfig, exist_ok=True)
+    AutoModelForTextToWaveform.register(
+        Qwen3TTSConfig,
+        Qwen3TTSForConditionalGeneration,
+        exist_ok=True,
+    )
+    assert AutoConfig.for_model("qwen3_tts").__class__ is Qwen3TTSConfig
+    assert AutoModelForTextToWaveform._model_mapping[Qwen3TTSConfig] is Qwen3TTSForConditionalGeneration
 
     predictor = {
         "vocab_size": 32,
@@ -81,14 +72,13 @@ def test_qwen_tts_tiny_model_constructs_and_forwards_without_source_patch():
             "interleaved": True,
         },
     }
-    config = config_module.Qwen3TTSConfig(
+    config = Qwen3TTSConfig(
         talker_config=talker,
         speaker_encoder_config={},
         tts_model_type="custom",
         tokenizer_type="12hz",
     )
-    assert config.talker_config.pad_token_id is None
-    model = model_module.Qwen3TTSForConditionalGeneration(config)
+    model = Qwen3TTSForConditionalGeneration(config)
     output = model.talker(
         inputs_embeds=torch.randn(2, 5, 8),
         attention_mask=torch.ones(2, 5, dtype=torch.long),

@@ -15,8 +15,10 @@
 
 import logging
 import types
+from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
 import torch
 
 from verl_omni.pipelines.model_base import OmniModelBase
@@ -25,43 +27,10 @@ from verl_omni.pipelines.qwen3_tts.talker_forward import (
     require_auto_language,
     tts_actor_logits,
 )
-from verl_omni.pipelines.qwen3_tts.transformers_compat import (
-    patch_qwen3_tts_config_defaults,
-    qwen3_tts_import_context,
-)
-
-logger = logging.getLogger(__name__)
-_PASSTHROUGH_TEMPLATE = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
-_TRAINABLE_PREFIXES = ("talker.model.", "talker.codec_head.")
-
-
-def _prepare_config_for_checkpoint(config) -> None:
-    speaker_config = getattr(config, "speaker_encoder_config", None)
-    if speaker_config is not None:
-        speaker_config.__dict__.pop("dtype", None)
-        speaker_config.__dict__.pop("_dtype", None)
 
 
 def _speaker_embedding(model, batch_size, device, dtype):
-    cached = getattr(model, "_verl_tts_speaker_embedding", None)
-    if cached is None:
-        path = getattr(model.config, "tts_spk_embed_path", None)
-        if not path:
-            return None
-        cached = load_speaker_xvector(path)
-        model._verl_tts_speaker_embedding = cached
-    return cached.to(device=device, dtype=dtype).expand(batch_size, -1)
-
-
-def _reinitialize_rope_buffers(model):
-    for submodule in model.modules():
-        rope_init = getattr(submodule, "rope_init_fn", None)
-        inv_freq = getattr(submodule, "inv_freq", None)
-        if rope_init is None or not torch.is_tensor(inv_freq):
-            continue
-        new_inv_freq, scaling = rope_init(submodule.config, device=inv_freq.device)
-        submodule.inv_freq.data.copy_(new_inv_freq.to(device=inv_freq.device, dtype=inv_freq.dtype))
-        submodule.attention_scaling = scaling
+    return model._verl_tts_speaker_embedding.to(device=device, dtype=dtype).expand(batch_size, -1)
 
 
 def _qwen3_tts_forward(
@@ -76,13 +45,9 @@ def _qwen3_tts_forward(
 ):
     from transformers.modeling_outputs import CausalLMOutputWithPast
 
-    if any(value is None for value in (tts_text_ids, tts_audio_codes, response_len, text_len)):
+    required_inputs = (input_ids, attention_mask, tts_text_ids, tts_audio_codes, response_len, text_len)
+    if any(value is None for value in required_inputs):
         raise RuntimeError("Qwen3-TTS forward is missing exact rollout codec fields.")
-    if attention_mask is None:
-        attention_mask = torch.ones_like(input_ids)
-    if not getattr(self, "_verl_tts_rope_initialized", False):
-        _reinitialize_rope_buffers(self)
-        self._verl_tts_rope_initialized = True
     speaker = _speaker_embedding(self, input_ids.shape[0], input_ids.device, next(self.talker.parameters()).dtype)
     return CausalLMOutputWithPast(
         logits=tts_actor_logits(
@@ -109,23 +74,17 @@ def _set_input_embeddings(self, value):
 @OmniModelBase.register("Qwen3TTSForConditionalGeneration", stage="talker")
 class Qwen3TTSTalkerAdapter(OmniModelBase):
     @classmethod
-    def load_hf_config(cls, model_path, *, trust_remote_code, attn_implementation):
-        with qwen3_tts_import_context():
-            from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSConfig
+    def register_auto_classes(cls) -> None:
+        from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSConfig
+        from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSForConditionalGeneration
+        from transformers import AutoConfig, AutoModelForTextToWaveform
 
-        patch_qwen3_tts_config_defaults(Qwen3TTSConfig)
-        return Qwen3TTSConfig.from_pretrained(
-            model_path,
-            trust_remote_code=trust_remote_code,
-            attn_implementation=attn_implementation,
+        AutoConfig.register("qwen3_tts", Qwen3TTSConfig, exist_ok=True)
+        AutoModelForTextToWaveform.register(
+            Qwen3TTSConfig,
+            Qwen3TTSForConditionalGeneration,
+            exist_ok=True,
         )
-
-    @classmethod
-    def get_model_class(cls):
-        with qwen3_tts_import_context():
-            from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSForConditionalGeneration
-
-        return Qwen3TTSForConditionalGeneration
 
     @classmethod
     def get_strip_modules(cls, model_config):
@@ -134,20 +93,20 @@ class Qwen3TTSTalkerAdapter(OmniModelBase):
     @classmethod
     def configure_model(cls, module, model_config):
         module = super().configure_model(module, model_config)
-        _prepare_config_for_checkpoint(module.config)
         module.config.tts_spk_embed_path = model_config.override_config.get("tts_spk_embed_path")
         module.config.tts_language = require_auto_language(model_config.override_config.get("tts_language", "Auto"))
         if not module.config.tts_spk_embed_path:
             raise ValueError("Qwen3-TTS GRPO requires tts_spk_embed_path for the validated non-streaming replay.")
+        module._verl_tts_speaker_embedding = load_speaker_xvector(module.config.tts_spk_embed_path)
         module.forward = types.MethodType(_qwen3_tts_forward, module)
         module.get_input_embeddings = types.MethodType(_get_input_embeddings, module)
         module.set_input_embeddings = types.MethodType(_set_input_embeddings, module)
         module._no_split_modules = ["Qwen3TTSTalkerDecoderLayer", "Qwen3TTSDecoderLayer"]
         trainable = 0
         for name, parameter in module.named_parameters():
-            parameter.requires_grad_(name.startswith(_TRAINABLE_PREFIXES))
+            parameter.requires_grad_(name.startswith(("talker.model.", "talker.codec_head.")))
             trainable += int(parameter.requires_grad)
-        logger.info("Qwen3-TTS talker adapter enabled %d trainable parameter tensors", trainable)
+        logging.getLogger(__name__).info("Qwen3-TTS talker adapter enabled %d trainable parameter tensors", trainable)
         return module
 
     @classmethod
@@ -159,34 +118,39 @@ class Qwen3TTSTalkerAdapter(OmniModelBase):
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=model_config.trust_remote_code)
-        tokenizer.chat_template = _PASSTHROUGH_TEMPLATE
+        tokenizer.chat_template = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
         if tokenizer.pad_token_id is None:
-            tokenizer.pad_token_id = tokenizer.eos_token_id or 0
-        talker_config = getattr(model_config.hf_config, "talker_config", None)
-        if talker_config is not None:
-            talker_config.tie_word_embeddings = False
+            if tokenizer.eos_token_id is None:
+                raise ValueError("Qwen3-TTS tokenizer must define either pad_token_id or eos_token_id.")
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        model_config.hf_config.talker_config.tie_word_embeddings = False
         return tokenizer
 
     @classmethod
     def prepare_model_inputs(cls, model_inputs, micro_batch, model_config):
         del model_config
-        fields = micro_batch.get("extra_fields")
-        if fields is None:
+        if "extra_fields" not in micro_batch:
             raise RuntimeError(
                 "Qwen3-TTS actor inputs require AgentLoopOutput.extra_fields; use the V1 agent-loop trainer path."
             )
-        if hasattr(fields, "tolist"):
+        fields = micro_batch["extra_fields"]
+        if isinstance(fields, np.ndarray):
             fields = fields.tolist()
-        if isinstance(fields, dict):
+        if isinstance(fields, Mapping):
             fields = [fields]
-        fields = [getattr(item, "data", item) for item in fields]
+        if not isinstance(fields, list) or any(not isinstance(item, Mapping) for item in fields):
+            raise TypeError("Qwen3-TTS actor extra_fields must be a list of mappings.")
         if len(fields) != model_inputs["input_ids"].shape[0]:
             raise RuntimeError("Qwen3-TTS actor extra_fields do not match its batch size.")
 
         texts = [torch.as_tensor(item["tts_text_ids"], dtype=torch.long).reshape(-1) for item in fields]
         codes = [torch.as_tensor(item["tts_audio_codes"], dtype=torch.long) for item in fields]
+        if any(item.numel() < 3 for item in texts):
+            raise ValueError("Qwen3-TTS actor text fields must contain at least three prefix tokens.")
         if any(item.ndim != 2 or item.shape[-1] != 16 for item in codes):
             raise ValueError("Qwen3-TTS codec codes must have shape (frames, 16).")
+        if any(item.shape[0] == 0 for item in codes):
+            raise ValueError("Qwen3-TTS actor codec fields must contain at least one frame.")
         device = model_inputs["input_ids"].device
         text_buffer = torch.zeros((len(fields), max(item.numel() for item in texts)), dtype=torch.long, device=device)
         code_buffer = torch.zeros(

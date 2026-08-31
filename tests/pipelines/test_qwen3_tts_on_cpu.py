@@ -18,7 +18,6 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
@@ -71,6 +70,8 @@ def test_only_validated_auto_language_layout_is_accepted():
     assert forward.require_auto_language("auto") == "Auto"
     with pytest.raises(ValueError, match="supports only tts_language=Auto"):
         forward.require_auto_language("Chinese")
+    with pytest.raises(ValueError, match="supports only tts_language=Auto"):
+        forward.require_auto_language(None)
 
 
 def test_actor_logits_align_to_effective_codec0_response(monkeypatch):
@@ -153,68 +154,8 @@ def test_codec_alignment_preserves_final_row_and_rejects_heuristic_match():
         rollout.align_audio_codes(malformed, token_ids)
 
 
-def test_rollout_chunk_accumulator_handles_cumulative_and_delta_outputs():
-    first = torch.zeros(12, 16, dtype=torch.long)
-    cumulative = torch.cat((first, torch.ones(1, 16, dtype=torch.long)))
-    assert torch.equal(rollout.append_tensor_chunk(first, cumulative), cumulative)
-
-    delta = torch.full((1, 16), 2, dtype=torch.long)
-    assert torch.equal(rollout.append_tensor_chunk(cumulative, delta), torch.cat((cumulative, delta)))
-    with pytest.raises(RuntimeError, match="changed shape"):
-        rollout.append_tensor_chunk(cumulative, torch.zeros(1, 15, dtype=torch.long))
-
-
-def test_validation_seed_covers_both_codec_samplers_and_candidates_without_mutation():
-    original = {"temperature": 0.8, "extra_args": {"existing": "kept"}}
-    seeded = rollout.with_rollout_generation_seed(
-        original,
-        {"split": "validation", "generation_seed": np.int64(42017)},
-        session_id=3,
-        global_steps=100,
-        require_session_id=True,
-    )
-
-    assert seeded == {
-        "temperature": 0.8,
-        "seed": 42020,
-        "extra_args": {"existing": "kept", "tts_local_seed": 42020},
-    }
-    assert seeded == rollout.with_rollout_generation_seed(
-        original,
-        {"split": "validation", "generation_seed": np.int64(42017)},
-        session_id=3,
-        global_steps=0,
-        require_session_id=True,
-    )
-    assert original == {"temperature": 0.8, "extra_args": {"existing": "kept"}}
-
-    gate_first = rollout.with_rollout_generation_seed(
-        {}, {"split": "gate", "id": "gate-7"}, session_id=0, global_steps=0, base_seed=42
-    )
-    gate_second = rollout.with_rollout_generation_seed(
-        {}, {"split": "gate", "id": "gate-7"}, session_id=1, global_steps=100, base_seed=42
-    )
-    assert gate_first["seed"] != gate_second["seed"]
-    assert gate_first == rollout.with_rollout_generation_seed(
-        {}, {"split": "gate", "id": "gate-7"}, session_id=0, global_steps=100, base_seed=42
-    )
-
-
-def test_training_seeds_are_reproducible_and_group_diverse():
-    kwargs = {
-        "extra_info": {"split": "train", "id": "sample-7"},
-        "global_steps": 12,
-        "uid": "uid-7",
-        "base_seed": 42,
-        "require_session_id": True,
-    }
-    first = rollout.with_rollout_generation_seed({}, session_id=0, **kwargs)
-    repeated = rollout.with_rollout_generation_seed({}, session_id=0, **kwargs)
-    second = rollout.with_rollout_generation_seed({}, session_id=1, **kwargs)
-    next_step = rollout.with_rollout_generation_seed({}, session_id=0, **{**kwargs, "global_steps": 13})
-
-    assert first == repeated
-    assert len({first["seed"], second["seed"], next_step["seed"]}) == 3
-    assert first["seed"] == first["extra_args"]["tts_local_seed"]
-    with pytest.raises(RuntimeError, match="session_id"):
-        rollout.with_rollout_generation_seed({}, session_id=None, **kwargs)
+def test_talker_batch_and_logit_mask_reject_contract_mismatches():
+    with pytest.raises(ValueError, match="matching non-empty"):
+        forward.build_talker_batch([], [], TOKENS, sub_codebook_vocab=2048)
+    with pytest.raises(ValueError, match="codebook_vocab"):
+        forward.mask_codec0_logits(torch.zeros((1, 2, 100)), 101, TOKENS.codec_eos)

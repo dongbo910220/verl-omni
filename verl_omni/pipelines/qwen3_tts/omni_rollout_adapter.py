@@ -13,9 +13,7 @@
 # limitations under the License.
 """Qwen3-TTS two-stage rollout adapter."""
 
-import copy
 import hashlib
-from collections.abc import Mapping
 from dataclasses import replace
 from functools import lru_cache
 
@@ -25,12 +23,7 @@ from vllm_omni.config.stage_config import PipelineConfig
 from vllm_omni.model_executor.models.qwen3_tts.pipeline import QWEN3_TTS_PIPELINE
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
-from verl_omni.pipelines.qwen3_tts.rollout_utils import (
-    align_audio_codes,
-    append_tensor_chunk,
-    is_evaluation_split,
-    with_rollout_generation_seed,
-)
+from verl_omni.pipelines.qwen3_tts.rollout_utils import align_audio_codes
 from verl_omni.pipelines.qwen3_tts.talker_forward import (
     TEXT_PROMPT_TRAILER_TOKENS,
     build_assistant_text,
@@ -39,13 +32,12 @@ from verl_omni.pipelines.qwen3_tts.talker_forward import (
 )
 
 _PIPELINE_ID = "qwen3_tts_rl"
-_SYNC_PROCESSOR = "verl_omni.pipelines.qwen3_tts.omni_rollout_adapter.talker2code2wav_token_only"
 QWEN3_TTS_RL_PIPELINE = PipelineConfig(
     model_type=_PIPELINE_ID,
     model_arch=QWEN3_TTS_PIPELINE.model_arch,
     stages=(
         replace(QWEN3_TTS_PIPELINE.stages[0], final_output=True, final_output_type="latent"),
-        replace(QWEN3_TTS_PIPELINE.stages[1], sync_process_input_func=_SYNC_PROCESSOR),
+        QWEN3_TTS_PIPELINE.stages[1],
     ),
 )
 
@@ -53,44 +45,6 @@ QWEN3_TTS_RL_PIPELINE = PipelineConfig(
 @lru_cache(maxsize=4)
 def _load_speaker_vector(path: str) -> list[float]:
     return load_speaker_xvector(path).reshape(-1).tolist()
-
-
-def _completion(output):
-    request_output = getattr(output, "request_output", None) or output
-    completions = getattr(request_output, "outputs", None)
-    return completions[0] if completions else None
-
-
-def _copy_plain_containers(value):
-    """Convert Ray/shared-memory Mapping/list shells to built-ins for upstream strict dict checks.
-
-    Tensor payloads are preserved rather than copied.
-    """
-    if isinstance(value, Mapping):
-        return {key: _copy_plain_containers(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_copy_plain_containers(item) for item in value]
-    return value
-
-
-def talker2code2wav_token_only(source_outputs, prompt=None, _requires_multimodal_data=False):
-    """Give the mutating upstream processor ordinary Python containers."""
-    from vllm_omni.model_executor.stage_input_processors.qwen3_tts import (
-        talker2code2wav_token_only as upstream_processor,
-    )
-
-    converted = []
-    for source_output in source_outputs:
-        source_copy = copy.copy(source_output)
-        source_copy.outputs = []
-        for completion in getattr(source_output, "outputs", []):
-            completion_copy = copy.copy(completion)
-            multimodal = getattr(completion, "multimodal_output", None)
-            if isinstance(multimodal, Mapping):
-                completion_copy.multimodal_output = _copy_plain_containers(multimodal)
-            source_copy.outputs.append(completion_copy)
-        converted.append(source_copy)
-    return upstream_processor(converted, prompt, _requires_multimodal_data)
 
 
 @OmniRolloutPipelineBase.register(_PIPELINE_ID)
@@ -124,38 +78,21 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
     @classmethod
     def get_stage_engine_extras(cls, stage_id, pipeline_mode="full"):
         cls._check_mode(pipeline_mode)
-        return {"max_model_len": 65536, "max_num_batched_tokens": 65536} if stage_id == 1 else {}
-
-    @classmethod
-    def prepare_agent_sampling_params(
-        cls,
-        sampling_params,
-        *,
-        rollout_config,
-        trainer_config,
-        agent_inputs,
-    ):
-        """Seed codec-0 and residual-codebook sampling for each GRPO candidate."""
-        extra_info = agent_inputs.get("extra_info")
-        evaluation = is_evaluation_split(extra_info)
-        candidate_count = rollout_config.val_kwargs.n if evaluation else rollout_config.n
-        return with_rollout_generation_seed(
-            sampling_params,
-            extra_info,
-            session_id=agent_inputs.get("session_id"),
-            global_steps=agent_inputs.get("global_steps"),
-            uid=agent_inputs.get("uid"),
-            base_seed=int(trainer_config.data.get("seed", 0)),
-            require_session_id=int(candidate_count) > 1,
-        )
+        if stage_id == 0:
+            return {}
+        if stage_id == 1:
+            return {"max_model_len": 65536, "max_num_batched_tokens": 65536}
+        raise ValueError(f"Qwen3-TTS has no rollout stage {stage_id}.")
 
     @classmethod
     def postprocess_agent_loop_output(cls, output, *, tokenizer, response_length):
         """Map the 16-codebook rollout to codec-0 policy tokens and replay fields."""
         extra = output.extra_fields
-        codes, text = extra.get("tts_audio_codes"), extra.get("tts_text")
-        if codes is None or text is None:
+        if "tts_audio_codes" not in extra or "tts_text" not in extra:
             raise RuntimeError("Qwen3-TTS rollout did not return codec codes and text.")
+        codes, text = extra["tts_audio_codes"], extra["tts_text"]
+        if not isinstance(text, str):
+            raise TypeError(f"Qwen3-TTS rollout text must be a string, got {type(text).__name__}.")
         codes = torch.as_tensor(codes, dtype=torch.long)
         if codes.ndim != 2 or codes.shape[-1] != 16:
             raise ValueError("Qwen3-TTS codec codes must have shape (frames, 16).")
@@ -167,7 +104,7 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
             if len(output.response_logprobs) < len(policy_ids):
                 raise RuntimeError("Qwen3-TTS rollout logprobs are shorter than the policy trajectory.")
             output.response_logprobs = output.response_logprobs[: len(policy_ids)]
-        text_ids = tokenizer(build_assistant_text(str(text)), return_tensors="pt", padding=False)["input_ids"]
+        text_ids = tokenizer(build_assistant_text(text), return_tensors="pt", padding=False)["input_ids"]
         text_ids = torch.as_tensor(text_ids, dtype=torch.long)
         if text_ids.ndim == 1:
             text_ids = text_ids.unsqueeze(0)
@@ -211,42 +148,41 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
     @classmethod
     def combine_engine_outputs(cls, outputs, prompt):
         """Combine stage-0 policy tokens with codec and waveform outputs."""
-        policy_output = None
-        policy_length = -1
-        audio_codes = waveform = None
-        sample_rate = None
-        diagnostics = []
-        for output in outputs:
-            completion = _completion(output)
-            if getattr(output, "stage_id", None) == 0 and completion is not None:
-                length = len(getattr(completion, "token_ids", None) or [])
-                if length >= policy_length:
-                    policy_output, policy_length = output, length
-            multimodal = getattr(output, "multimodal_output", None)
-            diagnostics.append((getattr(output, "stage_id", None), type(multimodal).__name__))
-            if not isinstance(multimodal, Mapping):
-                continue
-            codes = multimodal.get("codes")
-            if isinstance(codes, Mapping):
-                audio_codes = append_tensor_chunk(audio_codes, codes.get("audio"))
-            if getattr(output, "stage_id", None) == 1:
-                waveform = append_tensor_chunk(
-                    waveform, multimodal.get("audio", multimodal.get("model_outputs")), flatten=True
-                )
-                sample_rate = multimodal.get("sr", multimodal.get("audio_sample_rate", sample_rate))
-        if policy_output is None:
+        policy_outputs = [output for output in outputs if output.stage_id == 0]
+        decoder_outputs = [output for output in outputs if output.stage_id == 1]
+        if not policy_outputs:
             raise RuntimeError("Qwen3-TTS rollout produced no stage-0 policy output.")
-        token_ids = list(getattr(_completion(policy_output), "token_ids", None) or [])
-        if audio_codes is None:
-            raise RuntimeError(f"Qwen3-TTS rollout produced no codec trajectory: {diagnostics}")
+        if not decoder_outputs:
+            raise RuntimeError("Qwen3-TTS rollout produced no stage-1 decoder output.")
+
+        policy_output = policy_outputs[-1]
+        decoder_output = decoder_outputs[-1]
+        if len(policy_output.outputs) != 1:
+            raise RuntimeError(
+                f"Qwen3-TTS stage 0 must return exactly one completion, got {len(policy_output.outputs)}."
+            )
+        token_ids = list(policy_output.outputs[0].token_ids)
+        if not token_ids:
+            raise RuntimeError("Qwen3-TTS rollout returned an empty stage-0 policy trajectory.")
+
+        try:
+            audio_codes = torch.as_tensor(policy_output.multimodal_output["codes"]["audio"]).detach().cpu()
+            waveform = torch.as_tensor(decoder_output.multimodal_output["audio"]).detach().cpu().float().reshape(-1)
+            sample_rate = torch.as_tensor(decoder_output.multimodal_output["sr"])
+        except (KeyError, TypeError, ValueError, RuntimeError) as error:
+            raise RuntimeError("Qwen3-TTS rollout output does not match the pinned two-stage contract.") from error
+        if waveform.numel() == 0:
+            raise RuntimeError("Qwen3-TTS stage 1 returned an empty waveform.")
+        if sample_rate.numel() != 1:
+            raise RuntimeError("Qwen3-TTS stage 1 must return one scalar sample rate.")
+        sample_rate_value = float(sample_rate.item())
+        if sample_rate_value <= 0 or not sample_rate_value.is_integer():
+            raise RuntimeError(f"Qwen3-TTS stage 1 returned an invalid sample rate: {sample_rate_value!r}.")
+
         fields = {
             "tts_audio_codes": align_audio_codes(audio_codes, token_ids),
             "tts_text": prompt["additional_information"]["text"][0],
+            "audio": waveform,
+            "audio_sample_rate": int(sample_rate_value),
         }
-        if waveform is not None:
-            fields["audio"] = waveform.float().reshape(-1)
-        if sample_rate is not None:
-            if isinstance(sample_rate, list | tuple):
-                sample_rate = sample_rate[-1]
-            fields["audio_sample_rate"] = int(sample_rate.item() if hasattr(sample_rate, "item") else sample_rate)
         return policy_output, fields

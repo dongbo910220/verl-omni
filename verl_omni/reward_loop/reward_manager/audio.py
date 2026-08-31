@@ -15,6 +15,7 @@
 
 import inspect
 import math
+from collections.abc import Mapping
 
 import numpy as np
 import torch
@@ -37,13 +38,16 @@ class AudioRewardManager(RewardManagerBase):
     def _mapping(value):
         if isinstance(value, np.ndarray) and value.shape == ():
             value = value.item()
-        return dict(value.items()) if hasattr(value, "items") else {}
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise TypeError(f"Audio reward metadata must be a mapping, got {type(value).__name__}.")
+        return dict(value)
 
     @classmethod
-    def _extract_audio(cls, data_item, extra_info):
-        batch = data_item.non_tensor_batch
-        audio = extra_info.get("audio", batch.get("audio"))
-        sample_rate = extra_info.get("audio_sample_rate", batch.get("audio_sample_rate"))
+    def _extract_audio(cls, extra_info):
+        audio = extra_info.get("audio")
+        sample_rate = extra_info.get("audio_sample_rate")
         if audio is None:
             raise KeyError("Audio reward requires extra_info['audio'] from the rollout.")
         if sample_rate is None:
@@ -52,15 +56,7 @@ class AudioRewardManager(RewardManagerBase):
         try:
             waveform = torch.as_tensor(audio).detach().float().cpu()
         except (TypeError, ValueError, RuntimeError) as exc:
-            if not isinstance(audio, list | tuple):
-                raise ValueError("Audio reward could not convert the waveform to numeric samples.") from exc
-            try:
-                chunks = [torch.as_tensor(chunk).detach().float().cpu().reshape(-1) for chunk in audio]
-            except (TypeError, ValueError, RuntimeError) as chunk_exc:
-                raise ValueError(
-                    "Audio reward could not convert all waveform chunks to numeric samples."
-                ) from chunk_exc
-            waveform = torch.cat(chunks) if chunks else torch.empty(0)
+            raise ValueError("Audio reward could not convert the waveform to numeric samples.") from exc
         while waveform.ndim > 1 and waveform.shape[0] == 1:
             waveform = waveform[0]
         if waveform.ndim == 2:
@@ -72,15 +68,11 @@ class AudioRewardManager(RewardManagerBase):
         if not torch.isfinite(waveform).all():
             raise ValueError("Audio reward received a waveform containing NaN or infinity.")
 
-        if isinstance(sample_rate, list | tuple):
-            if len(sample_rate) != 1:
-                raise ValueError("Audio reward requires exactly one sample rate per waveform.")
-            sample_rate = sample_rate[0]
-        if hasattr(sample_rate, "item"):
-            try:
-                sample_rate = sample_rate.item()
-            except (RuntimeError, ValueError) as exc:
-                raise ValueError("Audio reward requires one scalar sample rate per waveform.") from exc
+        if isinstance(sample_rate, np.ndarray | torch.Tensor):
+            sample_rate_count = sample_rate.size if isinstance(sample_rate, np.ndarray) else sample_rate.numel()
+            if sample_rate_count != 1:
+                raise ValueError("Audio reward requires one scalar sample rate per waveform.")
+            sample_rate = sample_rate.item()
         if isinstance(sample_rate, bool) or not isinstance(sample_rate, int | float):
             raise TypeError(f"Audio sample rate must be numeric, got {type(sample_rate).__name__}.")
         if not math.isfinite(float(sample_rate)) or float(sample_rate) <= 0 or float(sample_rate) != int(sample_rate):
@@ -97,7 +89,7 @@ class AudioRewardManager(RewardManagerBase):
         extra_info["num_turns"] = batch.get("__num_turns__", extra_info.get("num_turns"))
         extra_info["global_steps"] = batch.get("global_steps", extra_info.get("global_steps", 0))
         ground_truth = batch["reward_model"]["ground_truth"]
-        audio = self._extract_audio(item, extra_info)
+        audio = self._extract_audio(extra_info)
         kwargs = {
             "data_source": batch["data_source"],
             "solution_audio": audio,

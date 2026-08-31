@@ -58,8 +58,8 @@ vllm-omni = [
 audio = [
     "qwen-omni-utils>=0.0.9",
 ]
-# Install qwen-tts separately with --no-deps because qwen-tts 0.1.1 pins
-# Transformers 4.57.3 while vLLM 0.27 requires Transformers 5.x.
+# Install qwen-tts separately from the pinned upstream Transformers 5 support
+# revision. The released 0.1.1 source and metadata target Transformers 4.57.3.
 tts = [
     "einops>=0.8.0",
     "librosa>=0.10.2",

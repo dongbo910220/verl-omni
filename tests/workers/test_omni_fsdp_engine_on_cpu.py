@@ -58,6 +58,7 @@ def _make_mock_model_config(**overrides):
     cfg.model_stage = "thinker"
     cfg.local_path = "/fake/model/path"
     cfg.trust_remote_code = False
+    cfg.external_lib = None
     cfg.use_liger = False
     cfg.use_fused_kernels = False
     cfg.enable_gradient_checkpointing = False
@@ -379,10 +380,11 @@ def test_collect_lora_params_import_not_from_verl():
 # ---------------------------------------------------------------------------
 
 
-def test_build_module_uses_auto_model_for_multimodal_lm():
-    """``_build_module`` uses ``AutoModelForMultimodalLM``, not ``AutoModelForCausalLM``."""
+def test_build_module_uses_stage_specific_auto_model_classes():
+    """Thinkers use multimodal auto models and talkers use text-to-waveform auto models."""
     omni_impl = _get_omni_impl_module()
     assert omni_impl.AutoModelForMultimodalLM is not None
+    assert omni_impl.AutoModelForTextToWaveform is not None
 
     tree = _parse_omni_impl_ast()
     import_names = set()
@@ -392,6 +394,9 @@ def test_build_module_uses_auto_model_for_multimodal_lm():
                 import_names.add(alias.name)
     assert "AutoModelForMultimodalLM" in import_names, (
         f"AutoModelForMultimodalLM not imported from transformers; imports: {import_names}"
+    )
+    assert "AutoModelForTextToWaveform" in import_names, (
+        f"AutoModelForTextToWaveform not imported from transformers; imports: {import_names}"
     )
     assert "AutoModelForCausalLM" not in import_names, "AutoModelForCausalLM should NOT be imported from transformers"
 
@@ -406,7 +411,6 @@ def test_build_module_calls_adapter_configure_model(architecture):
     fake_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
 
     fake_adapter_cls = MagicMock()
-    fake_adapter_cls.get_model_class.return_value = None
     fake_configured_module = MagicMock(spec=torch.nn.Module)
     fake_configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
     fake_adapter_cls.configure_model.return_value = fake_configured_module
@@ -441,7 +445,7 @@ def test_build_module_calls_adapter_configure_model(architecture):
         mock_get_cls.assert_called_once_with(
             architecture,
             model_config.model_stage,
-            model_config.get("external_lib"),
+            model_config.external_lib,
         )
 
         fake_adapter_cls.configure_model.assert_called_once_with(fake_module, model_config)
@@ -449,22 +453,23 @@ def test_build_module_calls_adapter_configure_model(architecture):
         assert result is fake_configured_module
 
 
-def test_build_module_uses_adapter_model_class_when_auto_model_is_incompatible():
+def test_build_module_uses_text_to_waveform_auto_model_for_talker():
     omni_impl = _get_omni_impl_module()
-    model_config = _make_mock_model_config(architecture="CustomOmniForConditionalGeneration")
+    model_config = _make_mock_model_config(
+        architecture="Qwen3TTSForConditionalGeneration",
+        model_stage="talker",
+    )
     loaded_module = MagicMock(spec=torch.nn.Module)
     loaded_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
     configured_module = MagicMock(spec=torch.nn.Module)
     configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
     adapter_cls = MagicMock()
-    custom_model_cls = MagicMock()
-    custom_model_cls.from_pretrained.return_value = loaded_module
-    adapter_cls.get_model_class.return_value = custom_model_cls
     adapter_cls.configure_model.return_value = configured_module
     model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
 
     with (
         patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
+        patch.object(omni_impl.AutoModelForTextToWaveform, "from_pretrained", return_value=loaded_module) as load,
         patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
         patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
         patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
@@ -477,8 +482,7 @@ def test_build_module_uses_adapter_model_class_when_auto_model_is_incompatible()
 
         result = engine._build_module()
 
-    adapter_cls.get_model_class.assert_called_once_with()
-    custom_model_cls.from_pretrained.assert_called_once_with(
+    load.assert_called_once_with(
         pretrained_model_name_or_path=model_config.local_path,
         torch_dtype=torch.float32,
         config=model_config.hf_config,

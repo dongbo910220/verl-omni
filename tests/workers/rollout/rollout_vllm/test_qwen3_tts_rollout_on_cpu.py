@@ -31,10 +31,7 @@ from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_tts import omni_rollout_adapter
 from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
 from verl_omni.pipelines.qwen3_tts.talker_training_adapter import Qwen3TTSTalkerAdapter
-from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import (
-    ARStrategy,
-    _retained_output_modalities,
-)
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
 
@@ -67,16 +64,6 @@ def test_optional_rollout_hooks_preserve_existing_ar_defaults():
 
     assert OmniRolloutPipelineBase.weight_sync_stage_ids() is None
     assert OmniRolloutPipelineBase.prepare_engine_prompt([], None, {}) is None
-    sampling_params = {"temperature": 0.8}
-    assert (
-        OmniRolloutPipelineBase.prepare_agent_sampling_params(
-            sampling_params,
-            rollout_config=None,
-            trainer_config=None,
-            agent_inputs={},
-        )
-        == sampling_params
-    )
     assert (
         OmniRolloutPipelineBase.postprocess_agent_loop_output(
             final,
@@ -86,6 +73,8 @@ def test_optional_rollout_hooks_preserve_existing_ar_defaults():
         is final
     )
     assert OmniRolloutPipelineBase.combine_engine_outputs([first, final], {}) == (final, {})
+    with pytest.raises(RuntimeError, match="no outputs"):
+        OmniRolloutPipelineBase.combine_engine_outputs([], {})
 
 
 def test_omni_single_turn_agent_resolves_registered_pipeline_adapter():
@@ -171,7 +160,9 @@ def test_rollout_adapter_builds_unique_prompt_and_scopes_weight_sync(tmp_path):
     assert first["additional_information"]["text"] == ["first text"]
     assert first["cache_salt"] != second["cache_salt"]
     assert Qwen3TTSRolloutAdapter.weight_sync_stage_ids("full") == [0]
-    assert _retained_output_modalities(Qwen3TTSRolloutAdapter.build_stage_configs("full")) == ["latent", "audio"]
+    assert [
+        stage.final_output_type for stage in Qwen3TTSRolloutAdapter.build_stage_configs("full") if stage.final_output
+    ] == ["latent", "audio"]
 
 
 def test_ar_strategy_resolves_qwen3_tts_adapter_and_scopes_weight_sync(monkeypatch):
@@ -214,7 +205,7 @@ def test_talker_adapter_pads_exact_rollout_fields_for_actor_forward():
     model_inputs = {"input_ids": torch.zeros(2, 6, dtype=torch.long)}
     micro_batch = {
         "extra_fields": [
-            {"tts_text_ids": [1, 2], "tts_audio_codes": torch.ones(3, 16, dtype=torch.long)},
+            {"tts_text_ids": [1, 2, 6], "tts_audio_codes": torch.ones(3, 16, dtype=torch.long)},
             {"tts_text_ids": [3, 4, 5], "tts_audio_codes": torch.full((2, 16), 2, dtype=torch.long)},
         ]
     }
@@ -223,7 +214,7 @@ def test_talker_adapter_pads_exact_rollout_fields_for_actor_forward():
 
     assert prepared["tts_text_ids"].shape == (2, 3)
     assert prepared["tts_audio_codes"].shape == (2, 3, 16)
-    assert prepared["text_len"].tolist() == [2, 3]
+    assert prepared["text_len"].tolist() == [3, 3]
     assert prepared["response_len"].tolist() == [3, 2]
     assert not prepared["tts_audio_codes"][1, 2].any()
 
@@ -260,24 +251,7 @@ def test_rollout_adapter_combines_policy_codes_and_waveform():
     assert fields["tts_text"] == "first text"
 
 
-def test_rollout_adapter_prepares_sampling_and_actor_policy_sequence():
-    rollout_config = SimpleNamespace(n=8, val_kwargs=SimpleNamespace(n=1))
-    trainer_config = SimpleNamespace(data={"seed": 42})
-    agent_inputs = {
-        "extra_info": {"split": "train", "id": "sample-7"},
-        "session_id": 3,
-        "global_steps": 12,
-        "uid": "uid-7",
-    }
-
-    seeded = Qwen3TTSRolloutAdapter.prepare_agent_sampling_params(
-        {"temperature": 0.8},
-        rollout_config=rollout_config,
-        trainer_config=trainer_config,
-        agent_inputs=agent_inputs,
-    )
-    assert seeded["seed"] == seeded["extra_args"]["tts_local_seed"]
-
+def test_rollout_adapter_prepares_actor_policy_sequence():
     codes = torch.arange(5 * 16, dtype=torch.long).reshape(5, 16)
     output = SimpleNamespace(
         prompt_ids=[9, 8],
@@ -343,7 +317,7 @@ def test_ar_strategy_prepares_stage_specific_sampling_params():
 
 @pytest.mark.asyncio
 async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sync():
-    policy = SimpleNamespace(request_output=SimpleNamespace(outputs=[]))
+    policy = SimpleNamespace(outputs=[])
 
     class Engine:
         def __init__(self):

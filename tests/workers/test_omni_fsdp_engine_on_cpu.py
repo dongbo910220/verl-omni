@@ -249,6 +249,9 @@ def test_policy_gradient_prepare_model_inputs_delegates_to_base_engine():
     omni_impl = _get_omni_impl_module()
     engine = object.__new__(omni_impl.OmniFSDPEngine)
     engine.model_config = _make_mock_model_config(trainer_type="policy_gradient")
+    engine.model_adapter_cls = types.SimpleNamespace(
+        prepare_model_inputs=lambda model_inputs, _micro_batch, _model_config: model_inputs
+    )
     engine._trainer_type = "policy_gradient"
     micro_batch = TensorDict({}, batch_size=[0])
 
@@ -269,6 +272,9 @@ def test_direct_preference_prepare_model_inputs_delegates_to_base_engine():
     omni_impl = _get_omni_impl_module()
     engine = object.__new__(omni_impl.OmniFSDPEngine)
     engine.model_config = _make_mock_model_config(trainer_type="direct_preference")
+    engine.model_adapter_cls = types.SimpleNamespace(
+        prepare_model_inputs=lambda model_inputs, _micro_batch, _model_config: model_inputs
+    )
     engine._trainer_type = "direct_preference"
     micro_batch = TensorDict({"input_ids": torch.ones(2, 3, dtype=torch.long)}, batch_size=[])
 
@@ -281,6 +287,32 @@ def test_direct_preference_prepare_model_inputs_delegates_to_base_engine():
 
     mock_base_prepare.assert_called_once_with(micro_batch)
     assert set(model_inputs) == {"input_ids"}
+    assert output_args == {"base": True}
+
+
+def test_prepare_model_inputs_applies_registered_adapter_hook():
+    """The omni engine delegates model-native replay inputs to its adapter."""
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.model_config = _make_mock_model_config(trainer_type="policy_gradient")
+    engine._trainer_type = "policy_gradient"
+    micro_batch = {"extra_fields": [{"conditioning": torch.ones(2, 3)}]}
+
+    class Adapter:
+        @classmethod
+        def prepare_model_inputs(cls, model_inputs, replay_batch, model_config):
+            assert model_config is engine.model_config
+            return {**model_inputs, "conditioning": replay_batch["extra_fields"][0]["conditioning"]}
+
+    engine.model_adapter_cls = Adapter
+    with patch.object(
+        omni_impl.FSDPEngineWithLMHead,
+        "prepare_model_inputs",
+        return_value=({"input_ids": torch.ones(1, 1, dtype=torch.long)}, {"base": True}),
+    ):
+        model_inputs, output_args = engine.prepare_model_inputs(micro_batch)
+
+    assert model_inputs["conditioning"].shape == (2, 3)
     assert output_args == {"base": True}
 
 

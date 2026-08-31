@@ -646,6 +646,22 @@ class OmniModelBase(ABC):
 
         return module
 
+    @classmethod
+    def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
+        """Add model-native rollout data to an actor replay forward call.
+
+        ``model_inputs`` contains the standard language-model inputs prepared
+        by verl. Talker and other multi-stage policies may also need trajectory
+        or conditioning data retained in the rollout ``extra_fields``. A model
+        adapter can validate those fields in ``micro_batch`` and return the
+        exact inputs required to replay the sampled policy sequence.
+
+        The default keeps the standard autoregressive path unchanged. An
+        adapter that overrides this hook must fail closed when required fields
+        or shapes are missing instead of reconstructing a different trajectory.
+        """
+        return model_inputs
+
 
 class OmniRolloutPipelineBase:
     """Registry for omni model vLLM-Omni pipeline topologies.
@@ -685,6 +701,20 @@ class OmniRolloutPipelineBase:
         topology or external runner configuration.
         """
         return cls._registry.get(model_type)
+
+    @classmethod
+    def postprocess_agent_loop_output(cls, output, *, tokenizer, response_length: int):
+        """Map model-native rollout data to the policy sequence used by RL.
+
+        Adapters for non-text autoregressive stages should put the sampled
+        policy tokens in ``response_ids`` and align ``response_mask`` and
+        optional ``response_logprobs`` one-to-one. Architecture-specific
+        trajectory and conditioning data stays in ``extra_fields`` for
+        :meth:`OmniModelBase.prepare_model_inputs`.
+
+        The default preserves the standard text-token output unchanged.
+        """
+        return output
 
     @classmethod
     @abstractmethod

@@ -30,6 +30,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from tensordict import TensorDict
+from tensordict.tensorclass import NonTensorData, NonTensorStack
+from verl.utils import tensordict_utils as tu
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -296,13 +298,22 @@ def test_prepare_model_inputs_applies_registered_adapter_hook():
     engine = object.__new__(omni_impl.OmniFSDPEngine)
     engine.model_config = _make_mock_model_config(trainer_type="policy_gradient")
     engine._trainer_type = "policy_gradient"
-    micro_batch = {"extra_fields": [{"conditioning": torch.ones(2, 3)}]}
+    replay_payloads = [
+        {"conditioning": torch.ones(2, 3)},
+        {"conditioning": torch.ones(2, 3) * 2},
+    ]
+    micro_batch = TensorDict(
+        {"test_talker_replay": NonTensorStack.from_list([NonTensorData(payload) for payload in replay_payloads])},
+        batch_size=[2],
+    )
 
     class Adapter:
         @classmethod
         def prepare_model_inputs(cls, model_inputs, replay_batch, model_config):
             assert model_config is engine.model_config
-            return {**model_inputs, "conditioning": replay_batch["extra_fields"][0]["conditioning"]}
+            payloads = tu.get(replay_batch, "test_talker_replay")
+            conditioning = torch.stack([payload["conditioning"] for payload in payloads])
+            return {**model_inputs, "conditioning": conditioning}
 
     engine.model_adapter_cls = Adapter
     with patch.object(
@@ -312,7 +323,8 @@ def test_prepare_model_inputs_applies_registered_adapter_hook():
     ):
         model_inputs, output_args = engine.prepare_model_inputs(micro_batch)
 
-    assert model_inputs["conditioning"].shape == (2, 3)
+    assert model_inputs["conditioning"].shape == (2, 2, 3)
+    assert model_inputs["conditioning"][1].tolist() == [[2.0] * 3] * 2
     assert output_args == {"base": True}
 
 

@@ -17,11 +17,12 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput
+from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput, AgentLoopWorker
 from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
+from verl.utils import tensordict_utils as tu
 
 from verl_omni.agent_loop.single_turn_agent_loop import OmniSingleTurnAgentLoop
-from verl_omni.pipelines.model_base import OmniModelBase, OmniRolloutPipelineBase
+from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 
 
 def _output(extra_fields):
@@ -33,6 +34,29 @@ def _output(extra_fields):
         num_turns=2,
         metrics=AgentLoopMetrics(),
         extra_fields=extra_fields,
+    )
+
+
+def _internal_output(replay_payload, *, response_token):
+    prompt_ids = torch.tensor([[10, 11]])
+    response_ids = torch.tensor([[response_token, 0]])
+    input_ids = torch.cat([prompt_ids, response_ids], dim=1)
+    return SimpleNamespace(
+        prompt_ids=prompt_ids,
+        response_ids=response_ids,
+        input_ids=input_ids,
+        position_ids=torch.arange(input_ids.shape[1]).unsqueeze(0),
+        response_mask=torch.tensor([[1, 0]]),
+        attention_mask=torch.tensor([[1, 1, 1, 0]]),
+        response_logprobs=None,
+        routed_experts=None,
+        teacher_logprobs=None,
+        teacher_ids=None,
+        multi_modal_inputs=None,
+        reward_score=None,
+        num_turns=2,
+        metrics=AgentLoopMetrics(),
+        extra_fields={"test_talker_replay": replay_payload},
     )
 
 
@@ -61,8 +85,15 @@ async def test_talker_contract_supports_different_trajectory_and_conditioning_sh
     hidden_states = torch.ones(4, 6)
     upstream_outputs = iter(
         [
-            _output({"rvq_codes": codebooks, "speaker_embedding": torch.ones(5)}),
-            _output({"policy_tokens": [31, 32, 33, 34], "thinker_hidden_states": hidden_states}),
+            _output({"rvq_replay": {"codes": codebooks, "speaker_embedding": torch.ones(5)}}),
+            _output(
+                {
+                    "hidden_state_replay": {
+                        "policy_tokens": [31, 32, 33, 34],
+                        "thinker_hidden_states": hidden_states,
+                    }
+                }
+            ),
         ]
     )
 
@@ -77,7 +108,8 @@ async def test_talker_contract_supports_different_trajectory_and_conditioning_sh
         @classmethod
         def postprocess_agent_loop_output(cls, output, *, tokenizer, response_length):
             del tokenizer
-            output.response_ids = output.extra_fields["rvq_codes"][:response_length, 0].tolist()
+            replay = output.extra_fields["rvq_replay"]
+            output.response_ids = replay["codes"][:response_length, 0].tolist()
             output.response_mask = [1] * len(output.response_ids)
             output.response_logprobs = [-0.2] * len(output.response_ids)
             return output
@@ -86,7 +118,8 @@ async def test_talker_contract_supports_different_trajectory_and_conditioning_sh
         @classmethod
         def postprocess_agent_loop_output(cls, output, *, tokenizer, response_length):
             del tokenizer
-            output.response_ids = output.extra_fields["policy_tokens"][:response_length]
+            replay = output.extra_fields["hidden_state_replay"]
+            output.response_ids = replay["policy_tokens"][:response_length]
             output.response_mask = [1] * len(output.response_ids)
             output.response_logprobs = None
             return output
@@ -101,37 +134,36 @@ async def test_talker_contract_supports_different_trajectory_and_conditioning_sh
     hidden_output = await loop.run({"temperature": 0.8}, raw_prompt=[{"role": "user", "content": "hello"}])
 
     assert rvq_output.response_ids == codebooks[:, 0].tolist()
-    assert rvq_output.extra_fields["rvq_codes"].shape == (3, 8)
+    assert rvq_output.extra_fields["rvq_replay"]["codes"].shape == (3, 8)
     assert hidden_output.response_ids == [31, 32, 33, 34]
-    assert hidden_output.extra_fields["thinker_hidden_states"].shape == (4, 6)
+    assert hidden_output.extra_fields["hidden_state_replay"]["thinker_hidden_states"].shape == (4, 6)
 
-    class RvqTrainingAdapter(OmniModelBase):
-        @classmethod
-        def prepare_model_inputs(cls, model_inputs, micro_batch, model_config):
-            del model_config
-            return {**model_inputs, "rvq_codes": micro_batch["extra_fields"][0]["rvq_codes"]}
 
-    class HiddenStateTrainingAdapter(OmniModelBase):
-        @classmethod
-        def prepare_model_inputs(cls, model_inputs, micro_batch, model_config):
-            del model_config
-            return {
-                **model_inputs,
-                "thinker_hidden_states": micro_batch["extra_fields"][0]["thinker_hidden_states"],
-            }
+def test_agent_loop_batches_model_defined_replay_payload_as_top_level_micro_batch_key():
+    replay_payloads = [
+        {"codes": torch.arange(24, dtype=torch.long).reshape(3, 8), "speaker_embedding": torch.ones(5)},
+        {"codes": torch.arange(32, dtype=torch.long).reshape(4, 8), "speaker_embedding": torch.ones(5) * 2},
+    ]
+    worker = object.__new__(AgentLoopWorker)
+    worker.reward_loop_worker_handles = None
 
-    rvq_inputs = RvqTrainingAdapter.prepare_model_inputs(
-        {"input_ids": torch.ones(1, 3, dtype=torch.long)},
-        {"extra_fields": [rvq_output.extra_fields]},
-        SimpleNamespace(),
+    data = worker._postprocess(
+        [
+            _internal_output(replay_payloads[0], response_token=7),
+            _internal_output(replay_payloads[1], response_token=8),
+        ]
     )
-    hidden_inputs = HiddenStateTrainingAdapter.prepare_model_inputs(
-        {"input_ids": torch.ones(1, 4, dtype=torch.long)},
-        {"extra_fields": [hidden_output.extra_fields]},
-        SimpleNamespace(),
-    )
-    assert rvq_inputs["rvq_codes"].shape == (3, 8)
-    assert hidden_inputs["thinker_hidden_states"].shape == (4, 6)
+
+    assert "extra_fields" not in data.non_tensor_batch
+    assert "test_talker_replay" in data.non_tensor_batch
+    assert data.non_tensor_batch["test_talker_replay"][0]["codes"].shape == (3, 8)
+    assert data.non_tensor_batch["test_talker_replay"][1]["codes"].shape == (4, 8)
+
+    micro_batch = data.to_tensordict()
+    transported_payloads = tu.get(micro_batch, "test_talker_replay")
+    assert len(transported_payloads) == 2
+    assert transported_payloads[0]["speaker_embedding"].tolist() == [1.0] * 5
+    assert transported_payloads[1]["speaker_embedding"].tolist() == [2.0] * 5
 
 
 @pytest.mark.asyncio

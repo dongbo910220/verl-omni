@@ -61,11 +61,15 @@ adapt each implementation to your model's architecture:
   This method runs before FSDP wrapping and LoRA injection.
 
 - **`prepare_model_inputs(model_inputs, micro_batch, model_config)`**
-  (optional): Validate model-native trajectory or conditioning data retained
-  by rollout and add it to the actor forward inputs. This is required when the
-  policy token sequence alone cannot reconstruct the exact sampled trajectory.
-  Missing required fields or inconsistent shapes should raise an actionable
-  error; the adapter must not silently reconstruct a different trajectory.
+  (optional): Validate model-native trajectory or conditioning data retained by
+  rollout and add it to the actor forward inputs. Per-sample rollout data starts
+  under a model-defined, namespaced key in `AgentLoopOutput.extra_fields`;
+  `AgentLoopWorker` batches that key into the top level of `micro_batch`. For
+  example, data stored as `output.extra_fields["your_model_replay"]` is consumed
+  as `micro_batch["your_model_replay"]`. This is required when the policy token
+  sequence alone cannot reconstruct the exact sampled trajectory. Missing
+  required fields or inconsistent shapes should raise an actionable error; the
+  adapter must not silently reconstruct a different trajectory.
 
 Reference:
 [`verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py`](../../verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py)
@@ -98,9 +102,10 @@ For a non-text autoregressive policy, also override
 `postprocess_agent_loop_output`. Put the sampled policy sequence in
 `response_ids`, align `response_mask` and optional `response_logprobs`
 one-to-one, and retain model-native acoustic trajectory and conditioning data
-in `extra_fields`. The corresponding training adapter consumes that payload in
-`prepare_model_inputs`. The common contract intentionally does not prescribe a
-codebook count, conditioning source, or model-specific payload keys.
+under a model-defined, namespaced key in `extra_fields`. The corresponding
+training adapter consumes the batched top-level key in `prepare_model_inputs`.
+The common contract intentionally does not prescribe the key name, its nested
+schema, a codebook count, or a conditioning source.
 
 Reference:
 [`verl_omni/pipelines/qwen3_omni/omni_rollout_adapter.py`](../../verl_omni/pipelines/qwen3_omni/omni_rollout_adapter.py)

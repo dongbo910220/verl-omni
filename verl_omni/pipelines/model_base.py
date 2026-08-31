@@ -652,9 +652,11 @@ class OmniModelBase(ABC):
 
         ``model_inputs`` contains the standard language-model inputs prepared
         by verl. Talker and other multi-stage policies may also need trajectory
-        or conditioning data retained in the rollout ``extra_fields``. A model
-        adapter can validate those fields in ``micro_batch`` and return the
-        exact inputs required to replay the sampled policy sequence.
+        or conditioning data retained under a model-defined key in the per-sample
+        rollout ``extra_fields``. ``AgentLoopWorker`` batches each such key into
+        the top level of ``micro_batch``. A model adapter can validate its own
+        namespaced payload and return the exact inputs required to replay the
+        sampled policy sequence.
 
         The default keeps the standard autoregressive path unchanged. An
         adapter that overrides this hook must fail closed when required fields
@@ -709,7 +711,9 @@ class OmniRolloutPipelineBase:
         Adapters for non-text autoregressive stages should put the sampled
         policy tokens in ``response_ids`` and align ``response_mask`` and
         optional ``response_logprobs`` one-to-one. Architecture-specific
-        trajectory and conditioning data stays in ``extra_fields`` for
+        trajectory and conditioning data stays under a model-defined,
+        namespaced key in ``extra_fields``. ``AgentLoopWorker`` later exposes
+        that key at the top level of the actor micro-batch for
         :meth:`OmniModelBase.prepare_model_inputs`.
 
         The default preserves the standard text-token output unchanged.

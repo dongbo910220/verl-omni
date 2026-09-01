@@ -14,6 +14,7 @@
 """Configuration dataclass for omni (thinker/talker) model training."""
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -28,6 +29,8 @@ from verl.workers.config.model import MtpConfig
 from verl_omni.utils.fs import resolve_model_local_dir
 
 __all__ = ["OmniModelConfig"]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass

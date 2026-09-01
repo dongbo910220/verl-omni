@@ -22,6 +22,8 @@ from tensordict import TensorDict
 
 from verl_omni.workers.config import DiffusionModelConfig
 
+logger = logging.getLogger(__name__)
+
 
 class DiffusionModelBase(ABC):
     """Abstract base class for diffusion model training helpers.
@@ -62,7 +64,7 @@ class DiffusionModelBase(ABC):
         algorithm = model_config.algorithm
 
         if architecture in {"QwenImagePipeline", "QwenImageEditPlusPipeline"}:
-            logging.getLogger(__name__).info(
+            logger.info(
                 "Applying monkey-patch for QwenImageTransformer2DModel Ulysses SP "
                 "This workaround will be removed once we upgrade to a diffusers release that "
                 "includes the upstream fix."
@@ -783,7 +785,7 @@ class OmniRolloutPipelineBase:
         for model_type, cls_ref in cls._registry.items():
             if cls_ref is cls:
                 return model_type
-        raise RuntimeError(f"{cls.__name__} is not registered as an omni rollout pipeline.")
+        return ""
 
     @classmethod
     def ensure_pipeline_registered(cls, pipeline_mode: str = "thinker_only") -> None:

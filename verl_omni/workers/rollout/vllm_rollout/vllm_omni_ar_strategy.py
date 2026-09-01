@@ -323,23 +323,24 @@ class ARStrategy(OmniStrategyBase):
         if final_res is None:
             raise RuntimeError("AR mode: vLLM-Omni engine yielded no output for the prompt.")
 
-        if not final_res.outputs:
+        req_output = getattr(final_res, "request_output", None) or final_res
+        if not req_output.outputs:
             raise RuntimeError("AR mode expects outputs with token IDs, but got None or empty.")
 
         extra_fields = {"global_steps": self.server.global_steps}
         if self._rollout_adapter is not None:
             extra_fields.update(final_res._verl_omni_rollout_fields)
-        token_ids = final_res.outputs[0].token_ids
+        token_ids = req_output.outputs[0].token_ids
         log_probs = None
         policy_params = params[0] if isinstance(params, list) else params
         if policy_params.logprobs is not None:
             log_probs = [
-                logprobs[token_ids[index]].logprob for index, logprobs in enumerate(final_res.outputs[0].logprobs)
+                logprobs[token_ids[index]].logprob for index, logprobs in enumerate(req_output.outputs[0].logprobs)
             ]
 
-        finish_reason = final_res.outputs[0].finish_reason
+        finish_reason = req_output.outputs[0].finish_reason
         stop_reason = self._map_stop_reason(finish_reason)
-        num_preempted = self._extract_num_preempted(final_res)
+        num_preempted = self._extract_num_preempted(req_output)
 
         return TokenOutput(
             token_ids=token_ids,

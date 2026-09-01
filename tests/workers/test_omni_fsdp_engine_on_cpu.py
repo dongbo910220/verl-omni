@@ -84,19 +84,26 @@ def _make_mock_model_config(**overrides):
 # Isolated module loader
 # ---------------------------------------------------------------------------
 
+_omni_impl_cache = None
+
 
 def _get_omni_impl_module():
     """Load ``omni_impl.py`` with pre-mocked ``sys.modules`` to bypass CUDA.
 
-    Reuses the module from ``sys.modules`` after the first call.
+    Returns a cached module after the first call.
     """
+    global _omni_impl_cache
+    if _omni_impl_cache is not None:
+        return _omni_impl_cache
+
     # If the module was already imported during pytest collection (e.g. by
     # ``test_omni_fsdp_merge_on_cpu.py``), reuse it to avoid re-running the
     # ``@EngineRegistry.register`` decorator and triggering a duplicate-key
     # assertion.
     _OMNI_IMPL_FQN = "verl_omni.workers.engine.fsdp.omni_impl"
     if _OMNI_IMPL_FQN in sys.modules:
-        return sys.modules[_OMNI_IMPL_FQN]
+        _omni_impl_cache = sys.modules[_OMNI_IMPL_FQN]
+        return _omni_impl_cache
 
     root_mod = sys.modules.setdefault("verl_omni", types.ModuleType("verl_omni"))
     root_mod.__path__ = [_VERL_OMNI_DIR]
@@ -143,6 +150,7 @@ def _get_omni_impl_module():
     sys.modules["verl_omni.workers.engine.fsdp.omni_impl"] = omni_impl
     spec.loader.exec_module(omni_impl)
 
+    _omni_impl_cache = omni_impl
     return omni_impl
 
 
@@ -436,7 +444,7 @@ def test_build_module_calls_adapter_configure_model(architecture):
         mock_get_cls.assert_called_once_with(
             architecture,
             model_config.model_stage,
-            model_config.external_lib,
+            model_config.get("external_lib"),
         )
 
         fake_adapter_cls.configure_model.assert_called_once_with(fake_module, model_config)

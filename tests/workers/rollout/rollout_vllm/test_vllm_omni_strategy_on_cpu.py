@@ -160,7 +160,7 @@ def test_ar_strategy_preserves_output_conversion():
         finish_reason="length",
         num_preempted=2,
     )
-    final_res = SimpleNamespace(outputs=[completion])
+    final_res = SimpleNamespace(request_output=SimpleNamespace(outputs=[completion]))
 
     output = strategy.process_output(
         final_res,

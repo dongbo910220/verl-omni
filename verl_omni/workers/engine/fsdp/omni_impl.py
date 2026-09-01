@@ -179,7 +179,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         adapter_cls = OmniModelBase.get_class_by_name(
             architecture,
             self.model_config.model_stage,
-            self.model_config.external_lib,
+            self.model_config.get("external_lib"),
         )
         self.model_adapter_cls = adapter_cls
 

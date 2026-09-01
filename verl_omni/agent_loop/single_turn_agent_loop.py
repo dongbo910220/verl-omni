@@ -30,7 +30,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 @register("omni_single_turn_agent")
 class OmniSingleTurnAgentLoop(SingleTurnAgentLoop):
-    """Single-turn loop for autoregressive omni stages with custom policy tokens."""
+    """Single-turn loop for an omni model's autoregressive Talker policy."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

@@ -98,7 +98,7 @@ pipeline variants with vLLM-Omni), `get_engine_hf_overrides` (HF config
 overrides like `enable_audio_output: false`), `get_stage_engine_extras`
 (per-stage overrides like `model_arch`).
 
-For a non-text autoregressive policy, also override
+When training an omni model's autoregressive Talker stage, also override
 `postprocess_agent_loop_output`. Put the sampled policy sequence in
 `response_ids`, align `response_mask` and optional `response_logprobs`
 one-to-one, and retain model-native acoustic trajectory and conditioning data
@@ -162,8 +162,9 @@ Key points:
   triggered by `VERL_USE_EXTERNAL_MODULES=verl_omni`.
 - No `stage_configs_path` — the rollout deploy config is auto-generated
   from `pipeline_name` by `vLLMOmniHttpServer`.
-- Use `omni_single_turn_agent` when a rollout adapter must map model-native
-  output to a non-text policy sequence. Standard text-token policies can keep
+- Use `omni_single_turn_agent` only for an omni model's autoregressive Talker
+  stage when its rollout adapter must map model-native output to the Talker
+  policy sequence. Standard text-token stages such as the Thinker can keep
   verl's `single_turn_agent`.
 - No `--config-path/--config-name` — all config comes from CLI overrides
   on `verl_omni`'s `omni_trainer.yaml` defaults.

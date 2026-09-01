@@ -291,6 +291,7 @@ def test_ar_strategy_prepares_stage_specific_sampling_params():
     )
     strategy = ARStrategy(server)
     strategy._rollout_adapter = Adapter
+    strategy._rollout_output_modalities = ["latent", "audio"]
     strategy._stage_sampling_constraints = {0: {}}
 
     prompt, params = strategy.preprocess_input(

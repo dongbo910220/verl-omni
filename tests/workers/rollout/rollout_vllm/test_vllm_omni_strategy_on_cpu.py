@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 import pytest
 import torch
 
+from verl_omni.pipelines.qwen3_omni.omni_rollout_adapter import Qwen3OmniRolloutAdapter
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_ar_strategy as ar_strategy_module
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as server_module
@@ -236,6 +237,50 @@ def test_ar_strategy_preserves_engine_argument_normalization():
         "logprobs_mode": "raw_logprobs",
         "compilation_config": {"keep": 1, "nested": {"keep": 2}},
     }
+
+
+def test_ar_strategy_preserves_qwen3_omni_thinker_only_contract():
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            max_model_len=8,
+            prompt_length=4,
+            response_length=4,
+            repetition_penalty=1.0,
+            logprobs_mode="processed_logprobs",
+        ),
+        model_config=SimpleNamespace(processor=None),
+        global_steps=12,
+    )
+    strategy = ARStrategy(server)
+    strategy._rollout_adapter = Qwen3OmniRolloutAdapter
+    strategy._rollout_output_modalities = None
+
+    engine_args = {"model_stage": "thinker"}
+    strategy.prepare_engine_args(engine_args, Namespace(stage_init_timeout=None, init_timeout=None))
+    assert engine_args["model_stage"] == "thinker"
+
+    prompt, params = strategy.preprocess_input(
+        prompt_ids=[1, 2],
+        sampling_params={"max_new_tokens": 2, "logprobs": True},
+        multi_modal_data={},
+        lora_request=None,
+        negative_prompt_ids=None,
+    )
+    assert prompt == {"prompt_token_ids": [1, 2]}
+    assert isinstance(params, ar_strategy_module.SamplingParams)
+
+    completion = SimpleNamespace(
+        token_ids=[7],
+        logprobs=[{7: SimpleNamespace(logprob=-0.25)}],
+        finish_reason="stop",
+        num_preempted=0,
+    )
+    output = strategy.process_output(
+        SimpleNamespace(request_output=SimpleNamespace(outputs=[completion])),
+        params=params,
+        sampling_params={},
+    )
+    assert output.extra_fields == {"global_steps": 12}
 
 
 def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):

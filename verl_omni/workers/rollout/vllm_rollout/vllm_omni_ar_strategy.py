@@ -180,9 +180,9 @@ class ARStrategy(OmniStrategyBase):
         engine_kwargs["deploy_config"] = deploy_path
 
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
-        if self._rollout_adapter is not None:
+        if self._rollout_output_modalities is not None:
             # The generated per-stage deploy config owns model_stage for
-            # heterogeneous pipelines such as Qwen3-TTS.
+            # multi-output pipelines such as Qwen3-TTS.
             engine_args["model_stage"] = None
         for timeout_key in ("stage_init_timeout", "init_timeout"):
             timeout_value = getattr(args, timeout_key, None)
@@ -263,10 +263,10 @@ class ARStrategy(OmniStrategyBase):
             sampling_params["logprobs"] = None
         sampling_params.setdefault("repetition_penalty", getattr(self.server.config, "repetition_penalty", 1.0))
         policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-        if self._rollout_adapter is not None:
+        if self._rollout_output_modalities is not None:
             params = copy.deepcopy(self.server.engine.default_sampling_params_list)
             if len(params) <= 1:
-                raise RuntimeError("An omni rollout adapter requires per-stage sampling parameters.")
+                raise RuntimeError("A multi-output omni rollout requires per-stage sampling parameters.")
             constrained = self._stage_sampling_constraints[0]
             for field in {"max_tokens", *sampling_params} - constrained.keys():
                 setattr(params[0], field, getattr(policy_params, field))
@@ -328,7 +328,7 @@ class ARStrategy(OmniStrategyBase):
             raise RuntimeError("AR mode expects outputs with token IDs, but got None or empty.")
 
         extra_fields = {"global_steps": self.server.global_steps}
-        if self._rollout_adapter is not None:
+        if self._rollout_output_modalities is not None:
             extra_fields.update(final_res._verl_omni_rollout_fields)
         token_ids = req_output.outputs[0].token_ids
         log_probs = None

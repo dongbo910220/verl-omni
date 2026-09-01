@@ -834,11 +834,6 @@ class OmniRolloutPipelineBase:
         return None
 
     @classmethod
-    def get_output_modalities(cls, pipeline_mode: str = "thinker_only") -> list[str] | None:
-        """Return intermediate modalities that must be retained by the engine."""
-        return None
-
-    @classmethod
     def combine_engine_outputs(cls, outputs: list, prompt: dict) -> tuple[Any, dict[str, Any]]:
         """Select the policy output and collect architecture-specific fields."""
         if not outputs:

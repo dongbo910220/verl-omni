@@ -15,6 +15,8 @@
 
 import torch
 
+QWEN3_TTS_REPLAY_KEY = "qwen3_tts_talker_replay"
+
 
 def align_audio_codes(audio_codes: torch.Tensor, token_ids: list[int]) -> torch.Tensor:
     """Recover residual codebooks using codec-0 policy tokens as an exact invariant.

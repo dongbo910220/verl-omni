@@ -30,6 +30,8 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 def _split_visible_devices(value: str) -> list[str]:
     """Split a visible-devices env value into stripped, non-empty entries."""
     return [entry.strip() for entry in value.split(",") if entry.strip()]
+
+
 class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.

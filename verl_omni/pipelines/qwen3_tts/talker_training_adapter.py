@@ -18,10 +18,11 @@ import types
 from collections.abc import Mapping
 from typing import Any
 
-import numpy as np
 import torch
+from verl.utils import tensordict_utils as tu
 
 from verl_omni.pipelines.model_base import OmniModelBase
+from verl_omni.pipelines.qwen3_tts.rollout_utils import QWEN3_TTS_REPLAY_KEY
 from verl_omni.pipelines.qwen3_tts.talker_forward import (
     load_speaker_xvector,
     require_auto_language,
@@ -129,22 +130,27 @@ class Qwen3TTSTalkerAdapter(OmniModelBase):
     @classmethod
     def prepare_model_inputs(cls, model_inputs, micro_batch, model_config):
         del model_config
-        if "extra_fields" not in micro_batch:
-            raise RuntimeError(
-                "Qwen3-TTS actor inputs require AgentLoopOutput.extra_fields; use the V1 agent-loop trainer path."
-            )
-        fields = micro_batch["extra_fields"]
-        if isinstance(fields, np.ndarray):
-            fields = fields.tolist()
-        if isinstance(fields, Mapping):
-            fields = [fields]
-        if not isinstance(fields, list) or any(not isinstance(item, Mapping) for item in fields):
+        # The online V1 trainer retains AgentLoopOutput.extra_fields as one mapping per sample.
+        sample_extra_fields = tu.get(micro_batch, "extra_fields")
+        if sample_extra_fields is None:
+            raise RuntimeError(f"Qwen3-TTS actor inputs require the {QWEN3_TTS_REPLAY_KEY!r} replay payload.")
+        if not isinstance(sample_extra_fields, list) or any(
+            not isinstance(item, Mapping) for item in sample_extra_fields
+        ):
             raise TypeError("Qwen3-TTS actor extra_fields must be a list of mappings.")
-        if len(fields) != model_inputs["input_ids"].shape[0]:
-            raise RuntimeError("Qwen3-TTS actor extra_fields do not match its batch size.")
+        if len(sample_extra_fields) != model_inputs["input_ids"].shape[0]:
+            raise RuntimeError("Qwen3-TTS actor extra_fields do not match the actor batch size.")
+        if any(QWEN3_TTS_REPLAY_KEY not in item for item in sample_extra_fields):
+            raise RuntimeError(f"Qwen3-TTS actor inputs require the {QWEN3_TTS_REPLAY_KEY!r} replay payload.")
 
-        texts = [torch.as_tensor(item["tts_text_ids"], dtype=torch.long).reshape(-1) for item in fields]
-        codes = [torch.as_tensor(item["tts_audio_codes"], dtype=torch.long) for item in fields]
+        fields = [item[QWEN3_TTS_REPLAY_KEY] for item in sample_extra_fields]
+        if any(not isinstance(item, Mapping) for item in fields):
+            raise TypeError(f"Qwen3-TTS {QWEN3_TTS_REPLAY_KEY!r} must be a list of mappings.")
+        if any("text_ids" not in item or "audio_codes" not in item for item in fields):
+            raise RuntimeError("Qwen3-TTS replay payloads must contain text_ids and audio_codes.")
+
+        texts = [torch.as_tensor(item["text_ids"], dtype=torch.long).reshape(-1) for item in fields]
+        codes = [torch.as_tensor(item["audio_codes"], dtype=torch.long) for item in fields]
         if any(item.numel() < 3 for item in texts):
             raise ValueError("Qwen3-TTS actor text fields must contain at least three prefix tokens.")
         if any(item.ndim != 2 or item.shape[-1] != 16 for item in codes):

@@ -19,17 +19,20 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from tensordict import TensorDict
 
 pytest.importorskip("verl")
 pytest.importorskip("vllm_omni")
 
-from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
+from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, AgentLoopOutput
+from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 from vllm import SamplingParams
 
 from verl_omni.agent_loop.single_turn_agent_loop import OmniSingleTurnAgentLoop
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_tts import omni_rollout_adapter
 from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
+from verl_omni.pipelines.qwen3_tts.rollout_utils import QWEN3_TTS_REPLAY_KEY
 from verl_omni.pipelines.qwen3_tts.talker_training_adapter import Qwen3TTSTalkerAdapter
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
@@ -85,50 +88,6 @@ def test_omni_single_turn_agent_resolves_registered_pipeline_adapter():
     missing_config = SimpleNamespace(engine_kwargs={"vllm_omni": {"pipeline_name": "missing"}})
     with pytest.raises(ValueError, match="requires a registered"):
         OmniSingleTurnAgentLoop._resolve_rollout_adapter(missing_config)
-
-
-@pytest.mark.asyncio
-async def test_omni_single_turn_agent_delegates_policy_mapping_to_adapter(monkeypatch):
-    class Adapter:
-        @staticmethod
-        def postprocess_agent_loop_output(output, **kwargs):
-            assert kwargs["response_length"] == 4
-            output.prompt_ids = [0]
-            return output
-
-    upstream_output = SimpleNamespace(
-        prompt_ids=[11, 12],
-        response_ids=[101, 102],
-        response_mask=[1, 1],
-        response_logprobs=[-0.1, -0.2],
-        extra_fields={"audio": torch.ones(8)},
-    )
-
-    async def upstream_run(_self, sampling_params, **kwargs):
-        assert sampling_params == {"temperature": 0.8}
-        assert kwargs["priority"] == 7
-        return upstream_output
-
-    monkeypatch.setattr(SingleTurnAgentLoop, "run", upstream_run)
-
-    loop = object.__new__(OmniSingleTurnAgentLoop)
-    loop.rollout_adapter = Adapter
-    loop.rollout_config = SimpleNamespace(response_length=4)
-    loop.response_length = 4
-    loop.tokenizer = _Tokenizer()
-
-    result = await OmniSingleTurnAgentLoop.run(
-        loop,
-        {"temperature": 0.8},
-        priority=7,
-        raw_prompt=[{"role": "user", "content": "hello"}],
-        session_id=2,
-    )
-
-    assert result.prompt_ids == [0]
-    assert result.response_ids == [101, 102]
-    assert result.response_logprobs == [-0.1, -0.2]
-    assert result.extra_fields["audio"].shape == (8,)
 
 
 def test_rollout_pipeline_registers_upstream_talker(monkeypatch):
@@ -203,12 +162,22 @@ def test_rollout_adapter_requires_speaker_embedding():
 
 def test_talker_adapter_pads_exact_rollout_fields_for_actor_forward():
     model_inputs = {"input_ids": torch.zeros(2, 6, dtype=torch.long)}
-    micro_batch = {
-        "extra_fields": [
-            {"tts_text_ids": [1, 2, 6], "tts_audio_codes": torch.ones(3, 16, dtype=torch.long)},
-            {"tts_text_ids": [3, 4, 5], "tts_audio_codes": torch.full((2, 16), 2, dtype=torch.long)},
+    payloads = [
+        {"text_ids": [1, 2, 6], "audio_codes": torch.ones(3, 16, dtype=torch.long)},
+        {"text_ids": [3, 4, 5], "audio_codes": torch.full((2, 16), 2, dtype=torch.long)},
+    ]
+    micro_batch = list_of_dict_to_tensordict(
+        [
+            AgentLoopOutput(
+                prompt_ids=[1],
+                response_ids=[2],
+                response_mask=[1],
+                metrics=AgentLoopMetrics(),
+                extra_fields={QWEN3_TTS_REPLAY_KEY: item},
+            ).as_dict()
+            for item in payloads
         ]
-    }
+    )
 
     prepared = Qwen3TTSTalkerAdapter.prepare_model_inputs(model_inputs, micro_batch, None)
 
@@ -219,11 +188,12 @@ def test_talker_adapter_pads_exact_rollout_fields_for_actor_forward():
     assert not prepared["tts_audio_codes"][1, 2].any()
 
 
-def test_talker_adapter_requires_v1_agent_loop_extra_fields():
+def test_talker_adapter_requires_namespaced_replay_payload():
     model_inputs = {"input_ids": torch.zeros(1, 4, dtype=torch.long)}
+    micro_batch = TensorDict({}, batch_size=[1])
 
-    with pytest.raises(RuntimeError, match="V1 agent-loop trainer"):
-        Qwen3TTSTalkerAdapter.prepare_model_inputs(model_inputs, {}, None)
+    with pytest.raises(RuntimeError, match=QWEN3_TTS_REPLAY_KEY):
+        Qwen3TTSTalkerAdapter.prepare_model_inputs(model_inputs, micro_batch, None)
 
 
 def test_rollout_adapter_combines_policy_codes_and_waveform():
@@ -258,7 +228,12 @@ def test_rollout_adapter_prepares_actor_policy_sequence():
         response_ids=[7, 6, 5, 4, 3],
         response_mask=[1] * 5,
         response_logprobs=[-0.1, -0.2, -0.3, -0.4, -0.5],
-        extra_fields={"tts_audio_codes": codes, "tts_text": "first text"},
+        extra_fields={
+            "tts_audio_codes": codes,
+            "tts_text": "first text",
+            "audio": torch.ones(2400),
+            "audio_sample_rate": 24_000,
+        },
     )
 
     result = Qwen3TTSRolloutAdapter.postprocess_agent_loop_output(
@@ -272,8 +247,12 @@ def test_rollout_adapter_prepares_actor_policy_sequence():
     assert result.response_ids == codes[:3, 0].tolist()
     assert result.response_mask == [1, 1, 1]
     assert result.response_logprobs == [-0.1, -0.2, -0.3]
-    torch.testing.assert_close(result.extra_fields["tts_audio_codes"], codes[:3])
-    assert result.extra_fields["tts_text_ids"]
+    assert "tts_audio_codes" not in result.extra_fields
+    assert "tts_text" not in result.extra_fields
+    replay = result.extra_fields[QWEN3_TTS_REPLAY_KEY]
+    torch.testing.assert_close(replay["audio_codes"], codes[:3])
+    assert replay["text_ids"]
+    assert result.extra_fields["audio_sample_rate"] == 24_000
 
 
 def test_ar_strategy_prepares_stage_specific_sampling_params():

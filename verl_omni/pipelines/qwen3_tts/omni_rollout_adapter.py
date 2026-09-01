@@ -23,7 +23,7 @@ from vllm_omni.config.stage_config import PipelineConfig
 from vllm_omni.model_executor.models.qwen3_tts.pipeline import QWEN3_TTS_PIPELINE
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
-from verl_omni.pipelines.qwen3_tts.rollout_utils import align_audio_codes
+from verl_omni.pipelines.qwen3_tts.rollout_utils import QWEN3_TTS_REPLAY_KEY, align_audio_codes
 from verl_omni.pipelines.qwen3_tts.talker_forward import (
     TEXT_PROMPT_TRAILER_TOKENS,
     build_assistant_text,
@@ -90,6 +90,8 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
         extra = output.extra_fields
         if "tts_audio_codes" not in extra or "tts_text" not in extra:
             raise RuntimeError("Qwen3-TTS rollout did not return codec codes and text.")
+        if QWEN3_TTS_REPLAY_KEY in extra:
+            raise RuntimeError(f"Qwen3-TTS rollout unexpectedly returned reserved field {QWEN3_TTS_REPLAY_KEY!r}.")
         codes, text = extra["tts_audio_codes"], extra["tts_text"]
         if not isinstance(text, str):
             raise TypeError(f"Qwen3-TTS rollout text must be a string, got {type(text).__name__}.")
@@ -110,8 +112,12 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
             text_ids = text_ids.unsqueeze(0)
         if text_ids.ndim != 2 or text_ids.shape[1] <= TEXT_PROMPT_TRAILER_TOKENS:
             raise ValueError("Qwen3-TTS assistant text tokenization returned an invalid sequence.")
-        extra["tts_text_ids"] = text_ids[:, :-TEXT_PROMPT_TRAILER_TOKENS].reshape(-1).tolist()
-        extra["tts_audio_codes"] = codes
+        extra[QWEN3_TTS_REPLAY_KEY] = {
+            "text_ids": text_ids[:, :-TEXT_PROMPT_TRAILER_TOKENS].reshape(-1).tolist(),
+            "audio_codes": codes,
+        }
+        del extra["tts_audio_codes"]
+        del extra["tts_text"]
         output.prompt_ids = [0]
         output.response_ids = policy_ids
         output.response_mask = [1] * len(policy_ids)

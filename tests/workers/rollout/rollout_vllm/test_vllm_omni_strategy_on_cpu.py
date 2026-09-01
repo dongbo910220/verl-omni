@@ -160,7 +160,7 @@ def test_ar_strategy_preserves_output_conversion():
         finish_reason="length",
         num_preempted=2,
     )
-    final_res = SimpleNamespace(request_output=SimpleNamespace(outputs=[completion]))
+    final_res = SimpleNamespace(outputs=[completion])
 
     output = strategy.process_output(
         final_res,
@@ -193,6 +193,26 @@ def test_ar_strategy_preserves_engine_kwarg_normalization(monkeypatch):
         "stage-overrides": {"stage": {}},
         "init-timeout": 600,
     }
+
+
+@pytest.mark.parametrize(
+    ("timeout_kwargs", "expected"),
+    [
+        ({"stage-init-timeout": 45}, {"stage-init-timeout": 45, "init-timeout": 600}),
+        (
+            {"stage_init_timeout": 45, "init-timeout": 90},
+            {"stage-init-timeout": 45, "init-timeout": 90},
+        ),
+    ],
+)
+def test_ar_strategy_preserves_hyphenated_timeout_kwargs(monkeypatch, timeout_kwargs, expected):
+    monkeypatch.setattr(ar_strategy_module.OmniRolloutPipelineBase, "get_class", lambda pipeline_name: None)
+    strategy = ARStrategy(SimpleNamespace())
+    engine_kwargs = {"pipeline_name": "missing", **timeout_kwargs}
+
+    strategy.preprocess_engine_kwargs(engine_kwargs)
+
+    assert engine_kwargs == expected
 
 
 def test_ar_strategy_preserves_engine_argument_normalization():

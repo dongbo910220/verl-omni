@@ -35,6 +35,8 @@ from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniS
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
+_WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
+
 
 def _drop_none_mapping_values(value: Any) -> Any:
     if isinstance(value, dict):
@@ -74,7 +76,7 @@ class ARStrategy(OmniStrategyBase):
         return vLLMHttpServer._get_override_generation_config(self.server)
 
     def worker_extension_cls(self, device_type: str) -> str:
-        return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
+        return _WORKER_EXTENSION
 
     def preprocess_engine_kwargs(self, engine_kwargs: dict[str, Any]) -> None:
         super().preprocess_engine_kwargs(engine_kwargs)
@@ -97,8 +99,8 @@ class ARStrategy(OmniStrategyBase):
                 hf_overrides.update(adapter_overrides)
                 engine_kwargs["hf_overrides"] = hf_overrides
 
-        stage_init_timeout = engine_kwargs.get("stage_init_timeout")
-        init_timeout = engine_kwargs.get("init_timeout")
+        stage_init_timeout = engine_kwargs.get("stage_init_timeout") or engine_kwargs.get("stage-init-timeout")
+        init_timeout = engine_kwargs.get("init_timeout") or engine_kwargs.get("init-timeout")
         if stage_init_timeout is not None and init_timeout is None:
             engine_kwargs["init_timeout"] = max(int(stage_init_timeout), 600)
 

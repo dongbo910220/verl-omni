@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+import os
 from typing import Any
 from uuid import uuid4
 
@@ -21,6 +23,9 @@ from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_cha
 
 from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
+
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 @register("omni_single_turn_agent")

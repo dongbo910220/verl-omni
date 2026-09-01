@@ -50,7 +50,13 @@ def align_audio_codes(audio_codes: torch.Tensor, token_ids: list[int]) -> torch.
             f"response_length={len(token_ids)}, raw_codec_rows={raw_codes.shape[0]}."
         )
 
-    copy_length, start = max(candidates)
+    copy_length = max(length for length, _ in candidates)
+    best_starts = [start for length, start in candidates if length == copy_length]
+    if len(best_starts) != 1:
+        raise RuntimeError(
+            "Ambiguous Qwen3-TTS codec alignment: multiple residual-codebook spans match the sampled policy."
+        )
+    start = best_starts[0]
     codes = raw_codes.new_zeros((len(token_ids), 16))
     if copy_length:
         codes[:copy_length] = raw_codes[start : start + copy_length]

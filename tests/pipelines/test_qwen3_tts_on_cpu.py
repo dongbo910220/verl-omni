@@ -21,11 +21,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-ROOT = Path(__file__).parents[2]
-
 
 def _load(name: str, relative_path: str):
-    spec = importlib.util.spec_from_file_location(name, ROOT / relative_path)
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).parents[2] / relative_path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     sys.modules[name] = module
@@ -152,6 +150,14 @@ def test_codec_alignment_preserves_final_row_and_rejects_heuristic_match():
     malformed[12:, 0] = torch.tensor([101, 999, 103])
     with pytest.raises(RuntimeError, match="Could not exactly align"):
         rollout.align_audio_codes(malformed, token_ids)
+
+
+def test_codec_alignment_rejects_ambiguous_exact_matches():
+    raw = torch.zeros(2, 16, dtype=torch.long)
+    raw[:, 0] = 101
+
+    with pytest.raises(RuntimeError, match="Ambiguous Qwen3-TTS codec alignment"):
+        rollout.align_audio_codes(raw, [101, 2150])
 
 
 def test_talker_batch_and_logit_mask_reject_contract_mismatches():

@@ -22,8 +22,6 @@ from tensordict import TensorDict
 
 from verl_omni.workers.config import DiffusionModelConfig
 
-logger = logging.getLogger(__name__)
-
 
 class DiffusionModelBase(ABC):
     """Abstract base class for diffusion model training helpers.
@@ -64,7 +62,7 @@ class DiffusionModelBase(ABC):
         algorithm = model_config.algorithm
 
         if architecture in {"QwenImagePipeline", "QwenImageEditPlusPipeline"}:
-            logger.info(
+            logging.getLogger(__name__).info(
                 "Applying monkey-patch for QwenImageTransformer2DModel Ulysses SP "
                 "This workaround will be removed once we upgrade to a diffusers release that "
                 "includes the upstream fix."

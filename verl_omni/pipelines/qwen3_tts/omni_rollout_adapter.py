@@ -132,7 +132,7 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
         speaker_path = model_config.override_config.get("tts_spk_embed_path")
         if not speaker_path:
             raise ValueError("Qwen3-TTS GRPO requires tts_spk_embed_path for the validated non-streaming replay.")
-        language = require_auto_language(model_config.override_config.get("tts_language", "Auto"))
+        language = require_auto_language(model_config.override_config.get("tts_language"))
         additional_information = {
             "task_type": ["Base"],
             "text": [text],

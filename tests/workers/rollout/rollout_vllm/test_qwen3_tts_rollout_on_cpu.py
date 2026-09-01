@@ -160,6 +160,21 @@ def test_rollout_adapter_requires_speaker_embedding():
         Qwen3TTSRolloutAdapter.prepare_engine_prompt([1], model_config, {})
 
 
+def test_qwen3_tts_adapters_require_explicit_language(tmp_path):
+    speaker = tmp_path / "speaker.json"
+    speaker.write_text("[0.0, 1.0]")
+    model_config = SimpleNamespace(
+        tokenizer=_Tokenizer(),
+        override_config={"tts_spk_embed_path": str(speaker)},
+        hf_config=SimpleNamespace(talker_config=SimpleNamespace(codec_eos_token_id=2150)),
+    )
+
+    with pytest.raises(ValueError, match="supports only tts_language=Auto"):
+        Qwen3TTSRolloutAdapter.prepare_engine_prompt([1], model_config, {})
+    with pytest.raises(ValueError, match="supports only tts_language=Auto"):
+        Qwen3TTSTalkerAdapter.configure_model(SimpleNamespace(config=SimpleNamespace()), model_config)
+
+
 def test_talker_adapter_pads_exact_rollout_fields_for_actor_forward():
     model_inputs = {"input_ids": torch.zeros(2, 6, dtype=torch.long)}
     payloads = [
@@ -292,6 +307,31 @@ def test_ar_strategy_prepares_stage_specific_sampling_params():
     assert params[0].temperature == pytest.approx(0.8)
     assert params[0].logprobs == 0
     assert params[1].stage == "decoder"
+
+
+@pytest.mark.parametrize(
+    ("adapter_prompt", "message"),
+    [
+        ({"additional_information": {"text": ["hello"]}}, "must contain prompt_token_ids"),
+        ({"prompt_token_ids": "1,2"}, "list of integers"),
+        ([1, 2], "must return a dict or None"),
+    ],
+)
+def test_ar_strategy_rejects_invalid_adapter_prompt(adapter_prompt, message):
+    class Adapter:
+        @staticmethod
+        def prepare_engine_prompt(**kwargs):
+            return adapter_prompt
+
+    server = SimpleNamespace(
+        model_config=SimpleNamespace(),
+        config=SimpleNamespace(max_model_len=64, prompt_length=16, response_length=8),
+    )
+    strategy = ARStrategy(server)
+    strategy._rollout_adapter = Adapter
+
+    with pytest.raises((RuntimeError, TypeError), match=message):
+        strategy.preprocess_input([5, 6], {}, {}, None, None)
 
 
 @pytest.mark.asyncio

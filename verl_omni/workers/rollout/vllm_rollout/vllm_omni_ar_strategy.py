@@ -222,7 +222,18 @@ class ARStrategy(OmniStrategyBase):
                 mm_processor_kwargs=mm_processor_kwargs,
             )
             adapter_prepared_prompt = prompt is not None
-        effective_prompt_ids = prompt.get("prompt_token_ids", prompt_ids) if prompt is not None else prompt_ids
+        if prompt is not None:
+            if not isinstance(prompt, dict):
+                raise TypeError(f"An omni rollout adapter must return a dict or None, got {type(prompt).__name__}.")
+            if "prompt_token_ids" not in prompt:
+                raise RuntimeError("An adapter-prepared omni prompt must contain prompt_token_ids.")
+            effective_prompt_ids = prompt["prompt_token_ids"]
+            if not isinstance(effective_prompt_ids, list) or any(
+                isinstance(token_id, bool) or not isinstance(token_id, int) for token_id in effective_prompt_ids
+            ):
+                raise TypeError("An adapter-prepared omni prompt must contain prompt_token_ids as a list of integers.")
+        else:
+            effective_prompt_ids = prompt_ids
         max_possible_tokens = self.server.config.max_model_len - len(effective_prompt_ids)
         if max_possible_tokens <= 0:
             raise ValueError(

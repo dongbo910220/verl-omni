@@ -95,7 +95,7 @@ class Qwen3TTSTalkerAdapter(OmniModelBase):
     def configure_model(cls, module, model_config):
         module = super().configure_model(module, model_config)
         module.config.tts_spk_embed_path = model_config.override_config.get("tts_spk_embed_path")
-        module.config.tts_language = require_auto_language(model_config.override_config.get("tts_language", "Auto"))
+        module.config.tts_language = require_auto_language(model_config.override_config.get("tts_language"))
         if not module.config.tts_spk_embed_path:
             raise ValueError("Qwen3-TTS GRPO requires tts_spk_embed_path for the validated non-streaming replay.")
         module._verl_tts_speaker_embedding = load_speaker_xvector(module.config.tts_spk_embed_path)

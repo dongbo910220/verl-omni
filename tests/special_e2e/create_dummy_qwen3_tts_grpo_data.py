@@ -20,23 +20,6 @@ from pathlib import Path
 
 import pandas as pd
 
-TRAIN_TEXTS = (
-    "Please read this sentence at a calm and steady pace.",
-    "A short speech sample checks the complete training path.",
-    "Clear pronunciation makes this audio easy to inspect.",
-    "The weather is pleasant and the morning train is on time.",
-    "Four simple prompts are enough for one smoke-test batch.",
-    "This second batch verifies another optimizer update.",
-    "Generated speech is decoded before the reward is computed.",
-    "The final checkpoint confirms that training completed.",
-)
-VALIDATION_TEXTS = (
-    "This is fixed validation sample one.",
-    "This is fixed validation sample two.",
-    "This is fixed validation sample three.",
-    "This is fixed validation sample four.",
-)
-
 
 def _row(text: str, sample_id: str, split: str) -> dict:
     extra_info = {"id": sample_id, "split": split}
@@ -54,8 +37,24 @@ def main() -> None:
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_rows = [_row(text, f"train-{index}", "train") for index, text in enumerate(TRAIN_TEXTS)]
-    validation_rows = [_row(text, f"validation-{index}", "validation") for index, text in enumerate(VALIDATION_TEXTS)]
+    train_texts = (
+        "Please read this sentence at a calm and steady pace.",
+        "A short speech sample checks the complete training path.",
+        "Clear pronunciation makes this audio easy to inspect.",
+        "The weather is pleasant and the morning train is on time.",
+        "Four simple prompts are enough for one smoke-test batch.",
+        "This second batch verifies another optimizer update.",
+        "Generated speech is decoded before the reward is computed.",
+        "The final checkpoint confirms that training completed.",
+    )
+    validation_texts = (
+        "This is fixed validation sample one.",
+        "This is fixed validation sample two.",
+        "This is fixed validation sample three.",
+        "This is fixed validation sample four.",
+    )
+    train_rows = [_row(text, f"train-{index}", "train") for index, text in enumerate(train_texts)]
+    validation_rows = [_row(text, f"validation-{index}", "validation") for index, text in enumerate(validation_texts)]
     pd.DataFrame(train_rows).to_parquet(args.output_dir / "train.parquet", index=False)
     pd.DataFrame(validation_rows).to_parquet(args.output_dir / "validation.parquet", index=False)
 

@@ -1,6 +1,6 @@
 # Qwen3-TTS GRPO with an audio reward
 
-Last updated: 08/31/2026.
+Last updated: 09/04/2026.
 
 This example full-parameter tunes the codec-0 policy of
 `Qwen/Qwen3-TTS-12Hz-0.6B-Base`. It uses verl's stock GRPO advantage,
@@ -118,16 +118,14 @@ OUTPUT_DIR=/path/to/output \
 bash examples/grpo_trainer/qwen3_tts/run_qwen3_tts_grpo.sh
 ```
 
-The example defaults are `B=4`, `G=8`, `lr=2e-7`, direct `low_var_kl` with
-coefficient `0.12`, two GPUs, and 500 updates. These are recipe values, not
-algorithm requirements. `norm_adv_by_std_in_grpo` remains at the upstream
-default. Actor, reference, rollout, and floating synchronized weights all use
-BF16; synchronized integer buffers keep their integer dtype. Check selected-token
-`diff_mean` and Pearson after synchronization as execution-consistency diagnostics,
-not as evidence of speech quality or FP32-equivalent numerics. Prefer
-`diff_mean < 0.005`; values from `0.005` to `0.01` require high Pearson and tail
-inspection, while sustained values at or above `0.01` should stop the run for
-investigation.
+The example defaults are `B=4`, `G=8`, `lr=1e-6` with 10 warmup steps and a
+constant schedule, direct `low_var_kl` with coefficient `0.12`, two GPUs, and
+500 updates. These are recipe values, not algorithm requirements.
+`norm_adv_by_std_in_grpo` remains at the upstream default. The actor and
+reference keep persistent parameters in FP32, while FSDP uses BF16 parameters
+for forward and backward computation with FP32 gradient reduction and buffers.
+The actor's AdamW state therefore remains FP32, and rollout inference remains
+BF16.
 
 For a two-update implementation smoke test:
 

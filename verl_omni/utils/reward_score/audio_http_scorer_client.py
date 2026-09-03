@@ -110,13 +110,13 @@ async def _session() -> aiohttp.ClientSession:
     return session
 
 
-async def _request_score(server_url: str, payload: dict, timeout_s: float) -> dict:
+async def _request_score(server_url: str, payload: dict, timeout: float) -> dict:
     session = await _session()
     try:
         async with session.post(
             server_url,
             json=payload,
-            timeout=aiohttp.ClientTimeout(total=timeout_s),
+            timeout=aiohttp.ClientTimeout(total=timeout),
         ) as response:
             if response.status != 200:
                 detail = await response.text()
@@ -129,7 +129,7 @@ async def _request_score(server_url: str, payload: dict, timeout_s: float) -> di
             except (aiohttp.ContentTypeError, ValueError) as exc:
                 raise RuntimeError("Audio scorer returned malformed JSON.") from exc
     except asyncio.TimeoutError as exc:
-        raise _RetryableHTTPError(f"Audio scorer timed out after {timeout_s} seconds.") from exc
+        raise _RetryableHTTPError(f"Audio scorer timed out after {timeout} seconds.") from exc
     return _validate_response(result)
 
 
@@ -137,39 +137,39 @@ async def compute_score(
     solution_audio,
     ground_truth: str,
     extra_info: dict | None = None,
+    data_source: str | None = None,
     *,
     server_url: str,
-    timeout_s: float = 120.0,
+    timeout: float = 120.0,
     max_retries: int = 2,
-    retry_backoff_s: float = 0.5,
-    **kwargs,
+    retry_backoff: float = 0.5,
 ) -> dict:
     """Send one waveform to an external scorer and return its finite score."""
-    del kwargs
-    if isinstance(timeout_s, bool) or not isinstance(timeout_s, int | float) or not math.isfinite(float(timeout_s)):
-        raise ValueError("timeout_s must be a finite number.")
-    if timeout_s <= 0:
-        raise ValueError("timeout_s must be positive.")
+    del data_source
+    if isinstance(timeout, bool) or not isinstance(timeout, int | float) or not math.isfinite(float(timeout)):
+        raise ValueError("timeout must be a finite number.")
+    if timeout <= 0:
+        raise ValueError("timeout must be positive.")
     if isinstance(max_retries, bool) or not isinstance(max_retries, int):
         raise ValueError("max_retries must be an integer.")
     if max_retries < 0:
         raise ValueError("max_retries must be non-negative.")
     if (
-        isinstance(retry_backoff_s, bool)
-        or not isinstance(retry_backoff_s, int | float)
-        or not math.isfinite(float(retry_backoff_s))
+        isinstance(retry_backoff, bool)
+        or not isinstance(retry_backoff, int | float)
+        or not math.isfinite(float(retry_backoff))
     ):
-        raise ValueError("retry_backoff_s must be a finite number.")
-    if retry_backoff_s < 0:
-        raise ValueError("retry_backoff_s must be non-negative.")
+        raise ValueError("retry_backoff must be a finite number.")
+    if retry_backoff < 0:
+        raise ValueError("retry_backoff must be non-negative.")
     payload = _serialize_request(solution_audio, ground_truth, extra_info)
 
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            return await _request_score(server_url, payload, timeout_s)
+            return await _request_score(server_url, payload, timeout)
         except (_RetryableHTTPError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
             last_error = exc
         if attempt < max_retries:
-            await asyncio.sleep(retry_backoff_s * (2**attempt))
+            await asyncio.sleep(retry_backoff * (2**attempt))
     raise RuntimeError(f"Audio scoring failed after {max_retries + 1} attempts: {last_error}") from last_error

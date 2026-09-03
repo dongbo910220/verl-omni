@@ -61,8 +61,10 @@ adapt each implementation to your model's architecture:
   This method runs before FSDP wrapping and LoRA injection.
 
 - **`register_auto_classes()`** (optional): Register classes supplied by an
-  optional model package with the appropriate Transformers Auto APIs. Qwen3-TTS
-  registers the official `qwen-tts` config and model with `AutoConfig` and
+  optional model package with the appropriate Transformers Auto APIs. The model
+  config resolves one `(architecture, stage)` adapter before calling this hook;
+  the base implementation is a no-op. Qwen3-TTS registers the official
+  `qwen-tts` config and model with `AutoConfig` and
   `AutoModelForTextToWaveform`; the FSDP engine still owns `from_pretrained`.
 
 - **`prepare_model_inputs(model_inputs, micro_batch, model_config)`**

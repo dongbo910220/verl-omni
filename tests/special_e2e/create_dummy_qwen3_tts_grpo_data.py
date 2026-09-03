@@ -16,9 +16,23 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import pandas as pd
+
+
+def _speaker_dimension(model_config_path: Path) -> int:
+    model_config = json.loads(model_config_path.read_text(encoding="utf-8"))
+    talker_dimension = model_config["talker_config"]["hidden_size"]
+    speaker_dimension = model_config["speaker_encoder_config"]["enc_dim"]
+    if talker_dimension != speaker_dimension:
+        raise ValueError(
+            f"speaker encoder output must match the talker hidden size: {speaker_dimension} != {talker_dimension}"
+        )
+    if not isinstance(speaker_dimension, int) or speaker_dimension <= 0:
+        raise ValueError(f"speaker dimension must be a positive integer, got {speaker_dimension!r}")
+    return speaker_dimension
 
 
 def _row(text: str, sample_id: str, split: str) -> dict:
@@ -34,6 +48,7 @@ def _row(text: str, sample_id: str, split: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--model-config", type=Path, required=True)
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -58,9 +73,8 @@ def main() -> None:
     pd.DataFrame(train_rows).to_parquet(args.output_dir / "train.parquet", index=False)
     pd.DataFrame(validation_rows).to_parquet(args.output_dir / "validation.parquet", index=False)
 
-    # Qwen3-TTS Base expects a 1024-dimensional speaker x-vector. A unit-norm
-    # deterministic fixture is sufficient for execution testing.
-    speaker = [1.0 / 32.0] * 1024
+    speaker_dimension = _speaker_dimension(args.model_config)
+    speaker = [1.0 / math.sqrt(speaker_dimension)] * speaker_dimension
     (args.output_dir / "speaker.json").write_text(json.dumps(speaker), encoding="utf-8")
 
 

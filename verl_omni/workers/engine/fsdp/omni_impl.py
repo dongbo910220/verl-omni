@@ -18,7 +18,7 @@ import warnings
 
 import torch
 from torch.distributed.tensor import DTensor
-from transformers import AutoModelForMultimodalLM, AutoModelForTextToWaveform
+from transformers import AutoModelForMultimodalLM
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id
 from verl.utils.fsdp_utils import (
@@ -203,9 +203,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            auto_model_cls = (
-                AutoModelForTextToWaveform if self.model_config.model_stage == "talker" else AutoModelForMultimodalLM
-            )
+            auto_model_cls = getattr(adapter_cls, "auto_model_class", None) or AutoModelForMultimodalLM
             module = auto_model_cls.from_pretrained(
                 pretrained_model_name_or_path=self.model_config.local_path,
                 torch_dtype=torch_dtype,
@@ -213,6 +211,13 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                 trust_remote_code=self.model_config.trust_remote_code,
             )
             module = adapter_cls.configure_model(module, self.model_config)
+
+            if self.engine_config.strategy == "fsdp" and not self.engine_config.use_orig_params:
+                trainability = {parameter.requires_grad for parameter in module.parameters()}
+                if len(trainability) > 1:
+                    raise ValueError(
+                        "FSDP1 requires use_orig_params=true when a model adapter freezes only part of the model."
+                    )
 
             module.to(torch_dtype)
 

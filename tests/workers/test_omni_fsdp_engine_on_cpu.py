@@ -379,11 +379,10 @@ def test_collect_lora_params_import_not_from_verl():
 # ---------------------------------------------------------------------------
 
 
-def test_build_module_uses_stage_specific_auto_model_classes():
-    """Thinkers use multimodal auto models and talkers use text-to-waveform auto models."""
+def test_build_module_uses_adapter_selected_auto_model_class():
+    """Adapters select non-default auto model classes without relying on stage names."""
     omni_impl = _get_omni_impl_module()
     assert omni_impl.AutoModelForMultimodalLM is not None
-    assert omni_impl.AutoModelForTextToWaveform is not None
 
     tree = _parse_omni_impl_ast()
     import_names = set()
@@ -394,22 +393,27 @@ def test_build_module_uses_stage_specific_auto_model_classes():
     assert "AutoModelForMultimodalLM" in import_names, (
         f"AutoModelForMultimodalLM not imported from transformers; imports: {import_names}"
     )
-    assert "AutoModelForTextToWaveform" in import_names, (
-        f"AutoModelForTextToWaveform not imported from transformers; imports: {import_names}"
-    )
+    assert "AutoModelForTextToWaveform" not in import_names
     assert "AutoModelForCausalLM" not in import_names, "AutoModelForCausalLM should NOT be imported from transformers"
 
 
-@pytest.mark.parametrize("architecture", ["Qwen3OmniMoeForConditionalGeneration"])
-def test_build_module_calls_adapter_configure_model(architecture):
+@pytest.mark.parametrize(
+    ("architecture", "model_stage"),
+    [
+        ("Qwen3OmniMoeForConditionalGeneration", "thinker"),
+        ("FutureOmniForConditionalGeneration", "talker"),
+    ],
+)
+def test_build_module_calls_adapter_configure_model(architecture, model_stage):
     """Mock ``from_pretrained``; verify ``adapter_cls.configure_model(module, cfg)``."""
     omni_impl = _get_omni_impl_module()
-    model_config = _make_mock_model_config(architecture=architecture)
+    model_config = _make_mock_model_config(architecture=architecture, model_stage=model_stage)
 
     fake_module = MagicMock(spec=torch.nn.Module)
     fake_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
 
     fake_adapter_cls = MagicMock()
+    fake_adapter_cls.auto_model_class = None
     fake_configured_module = MagicMock(spec=torch.nn.Module)
     fake_configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
     fake_adapter_cls.configure_model.return_value = fake_configured_module
@@ -431,6 +435,7 @@ def test_build_module_calls_adapter_configure_model(architecture):
         engine.engine_config = MagicMock()
         engine.engine_config.model_dtype = None
         engine.engine_config.forward_only = False
+        engine.engine_config.strategy = "fsdp2"
         engine.device_mesh = None
 
         result = engine._build_module()
@@ -453,6 +458,8 @@ def test_build_module_calls_adapter_configure_model(architecture):
 
 
 def test_build_module_uses_text_to_waveform_auto_model_for_talker():
+    from transformers import AutoModelForTextToWaveform
+
     omni_impl = _get_omni_impl_module()
     model_config = _make_mock_model_config(
         architecture="Qwen3TTSForConditionalGeneration",
@@ -463,12 +470,13 @@ def test_build_module_uses_text_to_waveform_auto_model_for_talker():
     configured_module = MagicMock(spec=torch.nn.Module)
     configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
     adapter_cls = MagicMock()
+    adapter_cls.auto_model_class = AutoModelForTextToWaveform
     adapter_cls.configure_model.return_value = configured_module
     model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
 
     with (
         patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
-        patch.object(omni_impl.AutoModelForTextToWaveform, "from_pretrained", return_value=loaded_module) as load,
+        patch.object(AutoModelForTextToWaveform, "from_pretrained", return_value=loaded_module) as load,
         patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
         patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
         patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
@@ -477,6 +485,7 @@ def test_build_module_uses_text_to_waveform_auto_model_for_talker():
         engine = object.__new__(omni_impl.OmniFSDPEngine)
         engine.model_config = model_config
         engine.engine_config = MagicMock(model_dtype=None, forward_only=False)
+        engine.engine_config.strategy = "fsdp2"
         engine.device_mesh = None
 
         result = engine._build_module()
@@ -489,6 +498,36 @@ def test_build_module_uses_text_to_waveform_auto_model_for_talker():
     )
     adapter_cls.configure_model.assert_called_once_with(loaded_module, model_config)
     assert result is configured_module
+
+
+def test_build_module_rejects_mixed_frozen_parameters_without_fsdp1_orig_params():
+    omni_impl = _get_omni_impl_module()
+    model_config = _make_mock_model_config()
+    loaded_module = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    configured_module = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    configured_module[0].requires_grad_(False)
+    adapter_cls = MagicMock()
+    adapter_cls.auto_model_class = None
+    adapter_cls.configure_model.return_value = configured_module
+    model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
+
+    with (
+        patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
+        patch.object(omni_impl.AutoModelForMultimodalLM, "from_pretrained", return_value=loaded_module),
+        patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
+        patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
+        patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
+    ):
+        precision_type.to_dtype.side_effect = lambda value: value
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.model_config = model_config
+        engine.engine_config = MagicMock(model_dtype=None, forward_only=False)
+        engine.engine_config.strategy = "fsdp"
+        engine.engine_config.use_orig_params = False
+        engine.device_mesh = None
+
+        with pytest.raises(ValueError, match="use_orig_params=true"):
+            engine._build_module()
 
 
 @pytest.mark.parametrize("option", ["use_liger", "use_fused_kernels"])

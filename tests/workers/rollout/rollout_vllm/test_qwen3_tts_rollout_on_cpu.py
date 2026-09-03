@@ -65,6 +65,7 @@ assert target == \"verl_omni.agent_loop.single_turn_agent_loop.OmniSingleTurnAge
 def test_optional_rollout_hooks_preserve_existing_ar_defaults():
     first, final = object(), object()
 
+    assert OmniRolloutPipelineBase.supports_async_chunk is True
     assert OmniRolloutPipelineBase.weight_sync_stage_ids() is None
     assert OmniRolloutPipelineBase.prepare_engine_prompt([], None, {}) is None
     assert (
@@ -75,7 +76,9 @@ def test_optional_rollout_hooks_preserve_existing_ar_defaults():
         )
         is final
     )
-    assert OmniRolloutPipelineBase.combine_engine_outputs([first, final], {}) == (final, {})
+    assert OmniRolloutPipelineBase.combine_engine_outputs([final], {}) == (final, {})
+    with pytest.raises(NotImplementedError, match="multiple final outputs"):
+        OmniRolloutPipelineBase.combine_engine_outputs([first, final], {})
     with pytest.raises(RuntimeError, match="no outputs"):
         OmniRolloutPipelineBase.combine_engine_outputs([], {})
 
@@ -139,6 +142,7 @@ def test_ar_strategy_resolves_qwen3_tts_adapter_and_scopes_weight_sync(monkeypat
         "output_mode": "ar",
         "pipeline_name": "qwen3_tts_rl",
         "pipeline_mode": "full",
+        "async_chunk": False,
     }
 
     strategy.preprocess_engine_kwargs(engine_kwargs)
@@ -146,7 +150,21 @@ def test_ar_strategy_resolves_qwen3_tts_adapter_and_scopes_weight_sync(monkeypat
     assert deploy_calls == [("qwen3_tts_rl", Qwen3TTSRolloutAdapter, "full")]
     assert strategy._rollout_adapter is Qwen3TTSRolloutAdapter
     assert strategy._weight_sync_stage_ids == [0]
-    assert engine_kwargs == {}
+    assert engine_kwargs == {"async-chunk": False}
+
+
+@pytest.mark.parametrize("async_chunk", [None, True])
+def test_ar_strategy_requires_non_chunked_qwen3_tts_rollout(async_chunk):
+    strategy = ARStrategy(SimpleNamespace(_rollout_flags={}))
+    engine_kwargs = {
+        "pipeline_name": "qwen3_tts_rl",
+        "pipeline_mode": "full",
+    }
+    if async_chunk is not None:
+        engine_kwargs["async_chunk"] = async_chunk
+
+    with pytest.raises(ValueError, match="requires async_chunk=false"):
+        strategy.preprocess_engine_kwargs(engine_kwargs)
 
 
 def test_rollout_adapter_requires_speaker_embedding():
@@ -173,6 +191,13 @@ def test_qwen3_tts_adapters_require_explicit_language(tmp_path):
         Qwen3TTSRolloutAdapter.prepare_engine_prompt([1], model_config, {})
     with pytest.raises(ValueError, match="supports only tts_language=Auto"):
         Qwen3TTSTalkerAdapter.configure_model(SimpleNamespace(config=SimpleNamespace()), model_config)
+
+
+def test_talker_adapter_rejects_remove_padding_before_model_configuration():
+    model_config = SimpleNamespace(use_remove_padding=True)
+
+    with pytest.raises(ValueError, match="use_remove_padding=false"):
+        Qwen3TTSTalkerAdapter.configure_model(SimpleNamespace(), model_config)
 
 
 def test_talker_adapter_pads_exact_rollout_fields_for_actor_forward():

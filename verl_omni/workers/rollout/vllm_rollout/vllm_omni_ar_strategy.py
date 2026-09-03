@@ -87,6 +87,14 @@ class ARStrategy(OmniStrategyBase):
 
         adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
         if adapter_cls is not None:
+            async_chunk = engine_kwargs.get("async_chunk", engine_kwargs.get("async-chunk", True))
+            if not isinstance(async_chunk, bool):
+                raise TypeError(f"async_chunk must be a boolean, got {type(async_chunk).__name__}.")
+            if async_chunk and not adapter_cls.supports_async_chunk:
+                raise ValueError(
+                    f"{adapter_cls.__name__} requires async_chunk=false because chunked stage outputs "
+                    "cannot be replayed by its actor adapter."
+                )
             self._rollout_adapter = adapter_cls
             self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, self._pipeline_mode)
             self.server._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=self._pipeline_mode)
@@ -126,6 +134,17 @@ class ARStrategy(OmniStrategyBase):
         self._rollout_output_modalities = (
             list(dict.fromkeys(final_output_types)) if len(final_output_types) > 1 else None
         )
+        adapter_combiner = getattr(adapter_cls.combine_engine_outputs, "__func__", adapter_cls.combine_engine_outputs)
+        default_combiner = getattr(
+            OmniRolloutPipelineBase.combine_engine_outputs,
+            "__func__",
+            OmniRolloutPipelineBase.combine_engine_outputs,
+        )
+        if self._rollout_output_modalities is not None and adapter_combiner is default_combiner:
+            raise ValueError(
+                f"{adapter_cls.__name__} exposes multiple final pipeline outputs but does not implement "
+                "combine_engine_outputs(); refusing to guess which output contains policy token IDs."
+            )
         self._stage_sampling_constraints = {stage.stage_id: dict(stage.sampling_constraints) for stage in stages}
         stage_extras = {
             stage.stage_id: dict(adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode))
@@ -144,8 +163,9 @@ class ARStrategy(OmniStrategyBase):
         tp_size = self.server.config.tensor_model_parallel_size
 
         deploy_dict: dict[str, object] = {"pipeline": pipeline_id}
-        if "async_chunk" in engine_kwargs:
-            deploy_dict["async_chunk"] = bool(engine_kwargs["async_chunk"])
+        async_chunk = engine_kwargs.get("async_chunk", engine_kwargs.get("async-chunk"))
+        if async_chunk is not None:
+            deploy_dict["async_chunk"] = async_chunk
 
         if visible_devices:
             device_count = len([device for device in visible_devices.split(",") if device.strip()])

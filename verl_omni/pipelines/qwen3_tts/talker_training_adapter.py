@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
+from transformers import AutoModelForTextToWaveform
 from verl.utils import tensordict_utils as tu
 
 from verl_omni.pipelines.model_base import OmniModelBase
@@ -74,6 +75,8 @@ def _set_input_embeddings(self, value):
 
 @OmniModelBase.register("Qwen3TTSForConditionalGeneration", stage="talker")
 class Qwen3TTSTalkerAdapter(OmniModelBase):
+    auto_model_class = AutoModelForTextToWaveform
+
     @classmethod
     def register_auto_classes(cls) -> None:
         from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSConfig
@@ -93,6 +96,8 @@ class Qwen3TTSTalkerAdapter(OmniModelBase):
 
     @classmethod
     def configure_model(cls, module, model_config):
+        if getattr(model_config, "use_remove_padding", False):
+            raise ValueError("Qwen3-TTS Talker training requires actor_rollout_ref.model.use_remove_padding=false.")
         module = super().configure_model(module, model_config)
         module.config.tts_spk_embed_path = model_config.override_config.get("tts_spk_embed_path")
         module.config.tts_language = require_auto_language(model_config.override_config.get("tts_language"))

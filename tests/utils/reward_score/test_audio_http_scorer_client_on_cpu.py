@@ -94,9 +94,10 @@ async def _run_retry_e2e():
     kwargs = {
         "solution_audio": (np.zeros(32, dtype=np.float32), 24_000),
         "ground_truth": "target text",
+        "data_source": "tts_reward",
         "server_url": server_url,
         "max_retries": 2,
-        "retry_backoff_s": 0,
+        "retry_backoff": 0,
     }
     try:
         result = await client.compute_score(**kwargs)
@@ -141,9 +142,9 @@ def test_response_validation_fails_closed(payload, message):
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"timeout_s": float("nan")}, "finite number"),
+        ({"timeout": float("nan")}, "finite number"),
         ({"max_retries": 1.5}, "integer"),
-        ({"retry_backoff_s": float("inf")}, "finite number"),
+        ({"retry_backoff": float("inf")}, "finite number"),
     ],
 )
 def test_invalid_retry_configuration_is_rejected(kwargs, message):
@@ -156,3 +157,13 @@ def test_invalid_retry_configuration_is_rejected(kwargs, message):
 
     with pytest.raises(ValueError, match=message):
         asyncio.run(call)
+
+
+def test_unknown_reward_configuration_is_not_silently_swallowed():
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        client.compute_score(
+            solution_audio=(np.zeros(1, dtype=np.float32), 24_000),
+            ground_truth="text",
+            server_url="http://127.0.0.1:1/score",
+            timeout_s=1.0,
+        )

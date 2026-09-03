@@ -44,18 +44,21 @@ def _manager(compute_score):
     return AudioRewardManager(_config(), MagicMock(), compute_score=compute_score)
 
 
-def _data(audio=None, sample_rate=24_000):
+def _data(audio=None, sample_rate=24_000, *, layout="streamed"):
     fields = {}
     if audio is not None:
         fields = {"audio": audio, "audio_sample_rate": sample_rate}
+    non_tensors = {
+        "data_source": ["tts_reward"],
+        "reward_model": [{"ground_truth": "ni3 hao3"}],
+        "extra_info": [{"id": "sample-0"}],
+        "tool_extra_fields": [fields if layout == "streamed" else {}],
+    }
+    if layout == "finalized" and audio is not None:
+        non_tensors.update({"audio": [audio], "audio_sample_rate": [sample_rate]})
     return DataProto.from_dict(
         tensors={"responses": torch.zeros(1, 4, dtype=torch.long)},
-        non_tensors={
-            "data_source": ["tts_reward"],
-            "reward_model": [{"ground_truth": "ni3 hao3"}],
-            "extra_info": [{"id": "sample-0"}],
-            "tool_extra_fields": [fields],
-        },
+        non_tensors=non_tensors,
     )
 
 
@@ -113,6 +116,7 @@ def test_run_single_passes_waveform_and_returns_diagnostics():
         assert sample_rate == 24_000
         assert ground_truth == "ni3 hao3"
         assert extra_info["id"] == "sample-0"
+        assert "global_steps" not in extra_info
         return {"score": 0.75, "pinyin_error_rate": 0.1}
 
     manager = _manager(compute_score)
@@ -122,6 +126,22 @@ def test_run_single_passes_waveform_and_returns_diagnostics():
         "reward_score": 0.75,
         "reward_extra_info": {"pinyin_error_rate": 0.1},
     }
+
+
+def test_run_single_reads_finalized_top_level_audio_layout():
+    def compute_score(solution_audio, extra_info, **kwargs):
+        waveform, sample_rate = solution_audio
+        np.testing.assert_array_equal(waveform, np.ones(8, dtype=np.float32))
+        assert sample_rate == 16_000
+        assert extra_info["id"] == "sample-0"
+        return 0.5
+
+    manager = _manager(compute_score)
+    result = manager.loop.run_until_complete(
+        manager.run_single(_data(np.ones(8, dtype=np.float32), 16_000, layout="finalized"))
+    )
+
+    assert result["reward_score"] == 0.5
 
 
 @pytest.mark.parametrize(
@@ -157,6 +177,13 @@ def test_chunked_waveform_is_rejected_instead_of_guessed():
         manager.loop.run_until_complete(
             manager.run_single(_data([torch.tensor([0.1, 0.2]), torch.tensor([0.3])], 16_000))
         )
+
+
+def test_two_dimensional_waveform_is_rejected_instead_of_downmixed_on_the_wrong_axis():
+    manager = _manager(lambda **kwargs: 0.5)
+
+    with pytest.raises(ValueError, match="one mono waveform"):
+        manager.loop.run_until_complete(manager.run_single(_data(np.zeros((128, 2)), 16_000)))
 
 
 @pytest.mark.asyncio

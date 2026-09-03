@@ -54,15 +54,18 @@ class AudioRewardManager(RewardManagerBase):
             raise KeyError("Audio reward requires extra_info['audio_sample_rate'] from the rollout.")
 
         try:
+            if isinstance(audio, np.ndarray) and audio.dtype == object:
+                audio = np.asarray(audio, dtype=np.float32)
             waveform = torch.as_tensor(audio).detach().float().cpu()
         except (TypeError, ValueError, RuntimeError) as exc:
             raise ValueError("Audio reward could not convert the waveform to numeric samples.") from exc
         while waveform.ndim > 1 and waveform.shape[0] == 1:
             waveform = waveform[0]
-        if waveform.ndim == 2:
-            waveform = waveform.mean(dim=0)
-        elif waveform.ndim != 1:
-            raise ValueError(f"Expected audio shape (T,) or (C,T), got {tuple(waveform.shape)}.")
+        if waveform.ndim != 1:
+            raise ValueError(
+                f"Expected one mono waveform with shape (T,) or leading singleton dimensions, "
+                f"got {tuple(waveform.shape)}."
+            )
         if waveform.numel() == 0:
             raise ValueError("Audio reward received an empty waveform.")
         if not torch.isfinite(waveform).all():
@@ -86,8 +89,13 @@ class AudioRewardManager(RewardManagerBase):
         batch = item.non_tensor_batch
         extra_info = self._mapping(batch.get("extra_info", {}))
         extra_info.update(self._mapping(batch.get("tool_extra_fields")))
-        extra_info["num_turns"] = batch.get("__num_turns__", extra_info.get("num_turns"))
-        extra_info["global_steps"] = batch.get("global_steps", extra_info.get("global_steps", 0))
+        for key in ("audio", "audio_sample_rate"):
+            if key in batch and batch[key] is not None:
+                extra_info[key] = batch[key]
+        if "__num_turns__" in batch:
+            extra_info["num_turns"] = batch["__num_turns__"]
+        if "global_steps" in batch:
+            extra_info["global_steps"] = batch["global_steps"]
         ground_truth = batch["reward_model"]["ground_truth"]
         audio = self._extract_audio(extra_info)
         kwargs = {

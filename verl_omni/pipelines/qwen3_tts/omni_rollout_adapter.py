@@ -49,6 +49,8 @@ def _load_speaker_vector(path: str) -> list[float]:
 
 @OmniRolloutPipelineBase.register(_PIPELINE_ID)
 class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
+    supports_async_chunk = False
+
     @classmethod
     def _check_mode(cls, pipeline_mode):
         if pipeline_mode != "full":

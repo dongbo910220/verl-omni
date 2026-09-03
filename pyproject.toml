@@ -66,7 +66,7 @@ tts = [
     "onnxruntime>=1.20.0",
     "soundfile>=0.12.1",
     "sox>=1.5.0",
-    "torchaudio",
+    "torchaudio==2.11.0",
 ]
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [

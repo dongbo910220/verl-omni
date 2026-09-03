@@ -13,11 +13,13 @@
 # limitations under the License.
 
 from argparse import Namespace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 import torch
+import yaml
 
 from verl_omni.pipelines.qwen3_omni.omni_rollout_adapter import Qwen3OmniRolloutAdapter
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
@@ -281,6 +283,47 @@ def test_ar_strategy_preserves_qwen3_omni_thinker_only_contract():
         sampling_params={},
     )
     assert output.extra_fields == {"global_steps": 12}
+
+
+def test_ar_strategy_writes_qwen3_omni_thinker_only_deploy_config(monkeypatch):
+    monkeypatch.setattr(ar_strategy_module, "get_visible_devices_keyword", lambda: "CUDA_VISIBLE_DEVICES")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            tensor_model_parallel_size=1,
+            text_encoder_tp_size=1,
+            max_model_len=8,
+            max_num_batched_tokens=8,
+        ),
+        _rollout_flags={},
+    )
+    strategy = ARStrategy(server)
+    engine_kwargs = {
+        "pipeline_name": "qwen3_omni_moe",
+        "pipeline_mode": "thinker_only",
+    }
+
+    strategy.preprocess_engine_kwargs(engine_kwargs)
+
+    deploy_path = engine_kwargs["deploy-config"]
+    deploy = yaml.safe_load(Path(deploy_path).read_text(encoding="utf-8"))
+    assert deploy["pipeline"] == Qwen3OmniRolloutAdapter.get_pipeline_id("thinker_only")
+    assert [stage["stage_id"] for stage in deploy["stages"]] == [0]
+    assert strategy._rollout_output_modalities is None
+    server._temp_deploy_ctx.cleanup()
+
+
+def test_ar_strategy_rejects_qwen3_omni_full_multi_output_without_combiner():
+    server = SimpleNamespace(_rollout_flags={})
+    strategy = ARStrategy(server)
+
+    with pytest.raises(ValueError, match="multiple final pipeline outputs"):
+        strategy.preprocess_engine_kwargs(
+            {
+                "pipeline_name": "qwen3_omni_moe",
+                "pipeline_mode": "full",
+            }
+        )
 
 
 def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):

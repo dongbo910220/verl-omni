@@ -491,6 +491,7 @@ class OmniModelBase(ABC):
     """
 
     _registry: dict[tuple[str, str], type["OmniModelBase"]] = {}
+    auto_model_class: Any = None
 
     @classmethod
     def register(cls, architecture: str, stage: str = "thinker"):
@@ -686,6 +687,7 @@ class OmniRolloutPipelineBase:
     """
 
     _registry: dict[str, type["OmniRolloutPipelineBase"]] = {}
+    supports_async_chunk = True
 
     @classmethod
     def register(cls, model_type: str):
@@ -838,4 +840,8 @@ class OmniRolloutPipelineBase:
         """Select the policy output and collect architecture-specific fields."""
         if not outputs:
             raise RuntimeError("The omni rollout engine returned no outputs.")
-        return outputs[-1], {}
+        if len(outputs) != 1:
+            raise NotImplementedError(
+                "An omni rollout adapter with multiple final outputs must implement combine_engine_outputs()."
+            )
+        return outputs[0], {}

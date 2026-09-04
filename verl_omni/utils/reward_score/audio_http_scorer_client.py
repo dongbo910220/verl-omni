@@ -77,10 +77,13 @@ def _validate_response(payload: Any) -> dict:
         raise RuntimeError(f"Audio scorer error: {payload['error']}")
     if "score" not in payload:
         raise RuntimeError("Audio scorer response is missing 'score'.")
+    raw_score = payload["score"]
+    if isinstance(raw_score, bool) or not isinstance(raw_score, int | float):
+        raise RuntimeError(f"Audio scorer returned an invalid score: {raw_score!r}.")
     try:
-        score = float(payload["score"])
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"Audio scorer returned an invalid score: {payload['score']!r}.") from exc
+        score = float(raw_score)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Audio scorer returned an invalid score: {raw_score!r}.") from exc
     if not math.isfinite(score):
         raise RuntimeError(f"Audio scorer returned a non-finite score: {score!r}.")
 
@@ -101,9 +104,11 @@ async def _session() -> aiohttp.ClientSession:
     loop = asyncio.get_running_loop()
     session = getattr(compute_score, "_session", None)
     session_loop = getattr(compute_score, "_session_loop", None)
-    if session is None or session.closed or session_loop is not loop:
-        if session is not None and not session.closed:
-            await session.close()
+    if session is not None and not session.closed:
+        if session_loop is not loop:
+            raise RuntimeError("Audio HTTP scorer session cannot be shared across event loops.")
+        return session
+    if session is None or session.closed:
         session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None))
         compute_score._session = session
         compute_score._session_loop = loop
@@ -119,7 +124,7 @@ async def _request_score(server_url: str, payload: dict, timeout: float) -> dict
             timeout=aiohttp.ClientTimeout(total=timeout),
         ) as response:
             if response.status != 200:
-                detail = await response.text()
+                detail = await response.text(errors="replace")
                 error = f"Audio scorer returned HTTP {response.status}: {detail}"
                 if response.status in {408, 429} or 500 <= response.status < 600:
                     raise _RetryableHTTPError(error)
@@ -162,7 +167,7 @@ async def compute_score(
         raise ValueError("retry_backoff must be a finite number.")
     if retry_backoff < 0:
         raise ValueError("retry_backoff must be non-negative.")
-    payload = _serialize_request(solution_audio, ground_truth, extra_info)
+    payload = await asyncio.to_thread(_serialize_request, solution_audio, ground_truth, extra_info)
 
     last_error = None
     for attempt in range(max_retries + 1):

@@ -17,6 +17,7 @@ import asyncio
 import base64
 import importlib.util
 import socket
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -71,14 +72,16 @@ def test_invalid_request_is_rejected(solution_audio, message):
 
 
 async def _run_retry_e2e():
-    state = {"attempts": 0, "always_fail": False}
+    state = {"attempts": 0, "always_fail": False, "invalid_body_once": False}
 
     async def score(request):
         payload = await request.json()
         assert payload["prompt"] == "target text"
         assert payload["sample_rate"] == 24_000
         state["attempts"] += 1
-        if state["always_fail"] or state["attempts"] <= 2:
+        if state["invalid_body_once"] and state["attempts"] == 1:
+            return web.Response(body=b"\xff", status=503, content_type="text/plain")
+        if state["always_fail"] or (not state["invalid_body_once"] and state["attempts"] <= 2):
             return web.json_response({"error": "temporary"}, status=503)
         return web.json_response({"score": 3.5, "raw_score": 3.5})
 
@@ -104,7 +107,12 @@ async def _run_retry_e2e():
         assert result == {"score": 3.5, "raw_score": 3.5}
         assert state["attempts"] == 3
 
-        state.update(attempts=0, always_fail=True)
+        state.update(attempts=0, invalid_body_once=True)
+        result = await client.compute_score(**kwargs)
+        assert result == {"score": 3.5, "raw_score": 3.5}
+        assert state["attempts"] == 2
+
+        state.update(attempts=0, always_fail=True, invalid_body_once=False)
         with pytest.raises(RuntimeError, match="failed after 3 attempts"):
             await client.compute_score(**kwargs)
         assert state["attempts"] == 3
@@ -128,6 +136,8 @@ def test_retryable_http_errors_are_bounded():
         ([], "JSON object"),
         ({"error": "model failed"}, "model failed"),
         ({}, "missing 'score'"),
+        ({"score": True}, "invalid score"),
+        ({"score": "1.25"}, "invalid score"),
         ({"score": "not-a-number"}, "invalid score"),
         ({"score": float("nan")}, "non-finite score"),
         ({"score": 1.0, "metric": float("inf")}, "finite JSON scalar"),
@@ -167,3 +177,47 @@ def test_unknown_reward_configuration_is_not_silently_swallowed():
             server_url="http://127.0.0.1:1/score",
             timeout_s=1.0,
         )
+
+
+def test_open_session_from_another_event_loop_fails_closed():
+    class Session:
+        closed = False
+
+    client.compute_score._session = Session()
+    client.compute_score._session_loop = object()
+    try:
+
+        async def get_session():
+            with pytest.raises(RuntimeError, match="cannot be shared across event loops"):
+                await client._session()
+
+        asyncio.run(get_session())
+    finally:
+        del client.compute_score._session
+        del client.compute_score._session_loop
+
+
+def test_compute_score_serializes_waveform_off_the_event_loop(monkeypatch):
+    event_loop_thread = threading.get_ident()
+    serialization_threads = []
+    original_serialize_request = client._serialize_request
+
+    def serialize_request(*args, **kwargs):
+        serialization_threads.append(threading.get_ident())
+        return original_serialize_request(*args, **kwargs)
+
+    async def request_score(*args, **kwargs):
+        return {"score": 1.0}
+
+    monkeypatch.setattr(client, "_serialize_request", serialize_request)
+    monkeypatch.setattr(client, "_request_score", request_score)
+    result = asyncio.run(
+        client.compute_score(
+            solution_audio=(np.zeros(32, dtype=np.float32), 24_000),
+            ground_truth="text",
+            server_url="http://127.0.0.1:1/score",
+        )
+    )
+
+    assert result == {"score": 1.0}
+    assert serialization_threads and serialization_threads[0] != event_loop_thread

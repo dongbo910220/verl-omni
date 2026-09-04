@@ -14,6 +14,8 @@
 """CPU tests for generic waveform reward routing."""
 
 import importlib.util
+import threading
+from functools import partial
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -22,6 +24,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 from verl import DataProto
+from verl.utils.reward_score import default_compute_score
 
 
 def _load_audio_reward_manager():
@@ -105,6 +108,12 @@ def test_run_single_rejects_multi_sample_batch():
 
     with pytest.raises(ValueError, match="batch size 2"):
         manager.loop.run_until_complete(manager.run_single(data))
+
+
+@pytest.mark.parametrize("compute_score", [default_compute_score, partial(default_compute_score)])
+def test_default_text_reward_function_is_rejected(compute_score):
+    with pytest.raises(ValueError, match="custom_reward_function"):
+        _manager(compute_score)
 
 
 def test_run_single_passes_waveform_and_returns_diagnostics():
@@ -195,6 +204,25 @@ async def test_async_score_function_is_supported():
     result = await _manager(compute_score).run_single(_data(torch.ones(32)))
 
     assert result == {"reward_score": -0.25, "reward_extra_info": {"judge_margin": 3.0}}
+
+
+@pytest.mark.asyncio
+async def test_waveform_extraction_runs_off_the_event_loop(monkeypatch):
+    event_loop_thread = threading.get_ident()
+    extraction_threads = []
+
+    def extract_audio(extra_info):
+        extraction_threads.append(threading.get_ident())
+        return np.zeros(8, dtype=np.float32), 24_000
+
+    async def compute_score(**kwargs):
+        return 0.5
+
+    monkeypatch.setattr(AudioRewardManager, "_extract_audio", staticmethod(extract_audio))
+    result = await _manager(compute_score).run_single(_data(np.ones(8, dtype=np.float32)))
+
+    assert result["reward_score"] == 0.5
+    assert extraction_threads and extraction_threads[0] != event_loop_thread
 
 
 @pytest.mark.parametrize("score", [float("nan"), float("inf"), -float("inf")])

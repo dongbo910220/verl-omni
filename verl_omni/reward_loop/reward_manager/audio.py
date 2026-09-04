@@ -13,23 +13,30 @@
 # limitations under the License.
 """Reward manager for audio waveforms produced by omni rollouts."""
 
+import asyncio
 import inspect
 import math
 from collections.abc import Mapping
+from functools import partial
 
 import numpy as np
 import torch
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
+from verl.utils.reward_score import default_compute_score as _upstream_default_compute_score
 
 
 class AudioRewardManager(RewardManagerBase):
     """Route one validated waveform per rollout to a custom reward function."""
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
-        super().__init__(config, tokenizer, compute_score)
-        if compute_score is None:
+        if (
+            compute_score is None
+            or compute_score is _upstream_default_compute_score
+            or (isinstance(compute_score, partial) and compute_score.func is _upstream_default_compute_score)
+        ):
             raise ValueError("AudioRewardManager requires reward.custom_reward_function.")
+        super().__init__(config, tokenizer, compute_score)
         self.is_async_reward_score = inspect.iscoroutinefunction(compute_score)
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
@@ -97,7 +104,7 @@ class AudioRewardManager(RewardManagerBase):
         if "global_steps" in batch:
             extra_info["global_steps"] = batch["global_steps"]
         ground_truth = batch["reward_model"]["ground_truth"]
-        audio = self._extract_audio(extra_info)
+        audio = await asyncio.to_thread(self._extract_audio, extra_info)
         kwargs = {
             "data_source": batch["data_source"],
             "solution_audio": audio,

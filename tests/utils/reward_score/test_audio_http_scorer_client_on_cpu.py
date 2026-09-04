@@ -80,7 +80,7 @@ async def _run_retry_e2e():
         state["attempts"] += 1
         if state["always_fail"] or state["attempts"] <= 2:
             return web.json_response({"error": "temporary"}, status=503)
-        return web.json_response({"score": 3.5, "speechjudge_raw_score": 3.5})
+        return web.json_response({"score": 3.5, "raw_score": 3.5})
 
     app = web.Application()
     app.router.add_post("/score", score)
@@ -101,7 +101,7 @@ async def _run_retry_e2e():
     }
     try:
         result = await client.compute_score(**kwargs)
-        assert result == {"score": 3.5, "speechjudge_raw_score": 3.5}
+        assert result == {"score": 3.5, "raw_score": 3.5}
         assert state["attempts"] == 3
 
         state.update(attempts=0, always_fail=True)

@@ -48,7 +48,7 @@ Model Base
 
 .. autoclass:: verl_omni.pipelines.model_base.OmniRolloutPipelineBase
    :members: register, get_class,
-             build_stage_configs, rollout_flags, weight_sync_stage_ids,
+             build_stage_configs, rollout_flags, weight_sync_stage_ids, policy_stage_id,
              get_pipeline_id, ensure_pipeline_registered, get_engine_hf_overrides,
              get_stage_engine_extras, prepare_engine_prompt,
              postprocess_agent_loop_output,

@@ -513,6 +513,11 @@ class OmniModelBase(ABC):
         )
 
     @classmethod
+    def peek_class(cls, architecture: str, stage: str) -> Optional[type["OmniModelBase"]]:
+        """Return the registered adapter for ``(architecture, stage)`` or ``None``."""
+        return cls._registry.get((architecture, stage))
+
+    @classmethod
     def get_class_by_name(
         cls,
         architecture: str,
@@ -756,6 +761,11 @@ class OmniRolloutPipelineBase:
     def weight_sync_stage_ids(cls, pipeline_mode="thinker_only") -> list[int] | None:
         """Return stages that receive actor weights, or all stages by default."""
         return None
+
+    @classmethod
+    def policy_stage_id(cls, pipeline_mode="thinker_only") -> int:
+        """Return the stage whose sampling parameters and logprobs define the policy."""
+        return 0
 
     @classmethod
     def get_pipeline_id(cls, pipeline_mode: str = "thinker_only") -> str:

@@ -64,6 +64,8 @@ class ARStrategy(OmniStrategyBase):
         self._rollout_output_modalities: list[str] | None = None
         self._weight_sync_stage_ids: list[int] | None = None
         self._stage_sampling_constraints: dict[int, dict[str, Any]] = {}
+        self._policy_stage_id = 0
+        self._policy_stage_index = 0
 
     def validate_configs(self) -> None:
         if self.server.config.max_model_len is None:
@@ -98,7 +100,6 @@ class ARStrategy(OmniStrategyBase):
             self._rollout_adapter = adapter_cls
             self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, self._pipeline_mode)
             self.server._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=self._pipeline_mode)
-            self._weight_sync_stage_ids = adapter_cls.weight_sync_stage_ids(pipeline_mode=self._pipeline_mode)
             adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=self._pipeline_mode)
             if adapter_overrides:
                 hf_overrides = engine_kwargs.get("hf_overrides", {})
@@ -129,6 +130,37 @@ class ARStrategy(OmniStrategyBase):
         """Write a deploy config YAML from the adapter's stage topology."""
         adapter_cls.ensure_pipeline_registered(pipeline_mode)
         stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
+        stage_ids = [stage.stage_id for stage in stages]
+        policy_stage_id = adapter_cls.policy_stage_id(pipeline_mode=pipeline_mode)
+        if isinstance(policy_stage_id, bool) or not isinstance(policy_stage_id, int):
+            raise TypeError(f"{adapter_cls.__name__}.policy_stage_id() must return an integer stage ID.")
+        if policy_stage_id not in stage_ids:
+            raise ValueError(
+                f"{adapter_cls.__name__}.policy_stage_id() returned unknown stage {policy_stage_id}; "
+                f"available stages are {stage_ids}."
+            )
+        self._policy_stage_id = policy_stage_id
+        self._policy_stage_index = stage_ids.index(policy_stage_id)
+
+        weight_sync_stage_ids = adapter_cls.weight_sync_stage_ids(pipeline_mode=pipeline_mode)
+        if weight_sync_stage_ids is not None:
+            if not isinstance(weight_sync_stage_ids, list):
+                raise TypeError(f"{adapter_cls.__name__}.weight_sync_stage_ids() must return a list or None.")
+            if not weight_sync_stage_ids:
+                raise ValueError(f"{adapter_cls.__name__}.weight_sync_stage_ids() must not return an empty list.")
+            if any(isinstance(stage_id, bool) or not isinstance(stage_id, int) for stage_id in weight_sync_stage_ids):
+                raise TypeError(f"{adapter_cls.__name__}.weight_sync_stage_ids() must contain only integer stage IDs.")
+            if len(weight_sync_stage_ids) != len(set(weight_sync_stage_ids)):
+                raise ValueError(f"{adapter_cls.__name__}.weight_sync_stage_ids() must contain unique stage IDs.")
+            unknown_stage_ids = sorted(set(weight_sync_stage_ids) - set(stage_ids))
+            if unknown_stage_ids:
+                raise ValueError(
+                    f"{adapter_cls.__name__}.weight_sync_stage_ids() returned unknown stages {unknown_stage_ids}; "
+                    f"available stages are {stage_ids}."
+                )
+            weight_sync_stage_ids = list(weight_sync_stage_ids)
+        self._weight_sync_stage_ids = weight_sync_stage_ids
+
         pipeline_id = adapter_cls.get_pipeline_id(pipeline_mode)
         final_output_types = [stage.final_output_type for stage in stages if stage.final_output]
         self._rollout_output_modalities = (
@@ -285,11 +317,11 @@ class ARStrategy(OmniStrategyBase):
         policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         if self._rollout_output_modalities is not None:
             params = copy.deepcopy(self.server.engine.default_sampling_params_list)
-            if len(params) <= 1:
+            if len(params) <= 1 or self._policy_stage_index >= len(params):
                 raise RuntimeError("A multi-output omni rollout requires per-stage sampling parameters.")
-            constrained = self._stage_sampling_constraints[0]
+            constrained = self._stage_sampling_constraints[self._policy_stage_id]
             for field in {"max_tokens", *sampling_params} - constrained.keys():
-                setattr(params[0], field, getattr(policy_params, field))
+                setattr(params[self._policy_stage_index], field, getattr(policy_params, field))
         else:
             params = policy_params
 
@@ -352,7 +384,7 @@ class ARStrategy(OmniStrategyBase):
             extra_fields.update(final_res._verl_omni_rollout_fields)
         token_ids = req_output.outputs[0].token_ids
         log_probs = None
-        policy_params = params[0] if isinstance(params, list) else params
+        policy_params = params[self._policy_stage_index] if isinstance(params, list) else params
         if policy_params.logprobs is not None:
             log_probs = [
                 logprobs[token_ids[index]].logprob for index, logprobs in enumerate(req_output.outputs[0].logprobs)

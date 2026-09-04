@@ -104,7 +104,9 @@ Optional overrides fall into four groups:
 
 - Pipeline setup: `ensure_pipeline_registered`, `get_engine_hf_overrides`, and
   `get_stage_engine_extras`.
-- Resource behavior: `weight_sync_stage_ids`.
+- Policy and resource behavior: `policy_stage_id` identifies the stage whose
+  sampling parameters and logprobs define the trained policy;
+  `weight_sync_stage_ids` identifies the stages that receive actor weights.
 - Request construction: `prepare_engine_prompt`.
 - Multi-stage output assembly: `combine_engine_outputs`. The AR generation
   strategy derives retained output modalities from stages marked

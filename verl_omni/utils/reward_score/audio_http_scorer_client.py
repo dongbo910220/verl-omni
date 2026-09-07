@@ -49,7 +49,12 @@ def _serialize_request(solution_audio, ground_truth: str, extra_info: dict | Non
     if not isinstance(solution_audio, tuple) or len(solution_audio) != 2:
         raise TypeError("Audio HTTP scorer expects solution_audio=(waveform, sample_rate).")
     waveform, sample_rate = solution_audio
-    waveform = np.asarray(waveform, dtype="<f4").reshape(-1)
+    waveform = np.asarray(waveform, dtype="<f4")
+    if waveform.ndim != 1:
+        raise ValueError(
+            f"Audio HTTP scorer expects a 1D mono waveform, got shape {tuple(waveform.shape)}."
+        )
+    waveform = waveform.reshape(-1)
     if waveform.size == 0:
         raise ValueError("Audio HTTP scorer received an empty waveform.")
     if not np.isfinite(waveform).all():

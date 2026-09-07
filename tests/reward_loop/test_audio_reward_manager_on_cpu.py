@@ -137,6 +137,29 @@ def test_run_single_passes_waveform_and_returns_diagnostics():
     }
 
 
+def test_run_single_forwards_reward_router_arguments():
+    expected_reward_model_tokenizer = MagicMock()
+
+    def compute_score(reward_router_address, reward_model_tokenizer, model_name, **kwargs):
+        assert reward_router_address == "reward-router:8000"
+        assert reward_model_tokenizer is expected_reward_model_tokenizer
+        assert model_name == "reward-model"
+        return 0.5
+
+    config = OmegaConf.create({"reward": {"reward_model": {"model_path": "reward-model"}}})
+    manager = AudioRewardManager(
+        config,
+        MagicMock(),
+        compute_score=compute_score,
+        reward_router_address="reward-router:8000",
+        reward_model_tokenizer=expected_reward_model_tokenizer,
+    )
+
+    result = manager.loop.run_until_complete(manager.run_single(_data(np.ones(8, dtype=np.float32))))
+
+    assert result["reward_score"] == 0.5
+
+
 def test_run_single_reads_finalized_top_level_audio_layout():
     def compute_score(solution_audio, extra_info, **kwargs):
         waveform, sample_rate = solution_audio

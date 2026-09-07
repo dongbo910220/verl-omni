@@ -111,6 +111,12 @@ class AudioRewardManager(RewardManagerBase):
             "ground_truth": ground_truth,
             "extra_info": extra_info,
         }
+        if self.reward_router_address is not None:
+            kwargs.update(
+                reward_router_address=self.reward_router_address,
+                reward_model_tokenizer=self.reward_model_tokenizer,
+                model_name=self.config.reward.reward_model.model_path,
+            )
         if self.is_async_reward_score:
             result = await self.compute_score(**kwargs)
         else:

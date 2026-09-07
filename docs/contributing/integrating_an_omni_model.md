@@ -108,9 +108,10 @@ Optional overrides fall into four groups:
   sampling parameters and logprobs define the trained policy;
   `weight_sync_stage_ids` identifies the stages that receive actor weights.
 - Request construction: `prepare_engine_prompt`.
-- Multi-stage output assembly: `combine_engine_outputs`. The AR generation
-  strategy derives retained output modalities from stages marked
-  `final_output` in the pipeline topology.
+- Multi-stage output assembly: override `combine_engine_outputs` to opt into
+  retaining outputs from every stage marked `final_output` in the pipeline
+  topology. Adapters that keep the default hook preserve the engine's existing
+  single-output behavior.
 
 Their defaults preserve the existing single-output AR behavior. Override only
 the hooks required by the model. A stage-split adapter may, for example, limit

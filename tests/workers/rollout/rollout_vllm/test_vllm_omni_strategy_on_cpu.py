@@ -318,19 +318,13 @@ def test_ar_strategy_resolves_nonzero_policy_and_weight_sync_stages(monkeypatch)
 
 
 @pytest.mark.parametrize(
-    ("policy_stage_id", "weight_sync_stage_ids", "error", "message"),
+    ("policy_stage_id", "weight_sync_stage_ids", "message"),
     [
-        (True, [1], TypeError, "integer stage ID"),
-        (2, [1], ValueError, "unknown stage 2"),
-        (0, [], ValueError, "empty list"),
-        (0, [1, 1], ValueError, "unique stage IDs"),
-        (0, [2], ValueError, "unknown stages"),
-        (0, [True], TypeError, "only integer stage IDs"),
+        (2, [1], "unknown stage 2"),
+        (0, [2], "unknown stages"),
     ],
 )
-def test_ar_strategy_rejects_invalid_adapter_stage_contracts(
-    monkeypatch, policy_stage_id, weight_sync_stage_ids, error, message
-):
+def test_ar_strategy_rejects_unknown_adapter_stages(monkeypatch, policy_stage_id, weight_sync_stage_ids, message):
     class Adapter(OmniRolloutPipelineBase):
         @classmethod
         def build_stage_configs(cls, pipeline_mode="thinker_only"):
@@ -350,7 +344,7 @@ def test_ar_strategy_rejects_invalid_adapter_stage_contracts(
     monkeypatch.setattr(ar_strategy_module.OmniRolloutPipelineBase, "get_class", lambda pipeline_name: Adapter)
     strategy = ARStrategy(SimpleNamespace(_rollout_flags={}))
 
-    with pytest.raises(error, match=message):
+    with pytest.raises(ValueError, match=message):
         strategy.preprocess_engine_kwargs({"pipeline_name": "adapter"})
 
 
@@ -421,6 +415,18 @@ def test_ar_strategy_prepares_sampling_params_for_nonzero_policy_stage():
     assert params[1].temperature == pytest.approx(0.8)
     assert params[1].logprobs == 0
 
+    _, next_params = strategy.preprocess_input(
+        [5, 6],
+        {"temperature": 0.2, "logprobs": True},
+        {},
+        None,
+        None,
+    )
+    assert params[0] is next_params[0]
+    assert params[1] is not next_params[1]
+    assert params[1].temperature == pytest.approx(0.8)
+    assert next_params[1].temperature == pytest.approx(0.2)
+
     completion = SimpleNamespace(
         token_ids=[7],
         logprobs=[{7: SimpleNamespace(logprob=-0.25)}],
@@ -428,17 +434,18 @@ def test_ar_strategy_prepares_sampling_params_for_nonzero_policy_stage():
         num_preempted=0,
     )
     final_res = SimpleNamespace(
+        request_id="request-0",
         request_output=SimpleNamespace(outputs=[completion]),
-        _verl_omni_rollout_fields={},
     )
+    strategy._rollout_fields_by_request_id["request-0"] = {}
     assert strategy.process_output(final_res, params, {}).log_probs == [-0.25]
+    assert strategy._rollout_fields_by_request_id == {}
 
 
 @pytest.mark.parametrize(
     ("adapter_prompt", "message"),
     [
         ({"additional_information": {"text": ["hello"]}}, "must contain prompt_token_ids"),
-        ({"prompt_token_ids": "1,2"}, "list of integers"),
         ([1, 2], "must return a dict or None"),
     ],
 )
@@ -461,7 +468,8 @@ def test_ar_strategy_rejects_invalid_adapter_prompt(adapter_prompt, message):
 
 @pytest.mark.asyncio
 async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sync():
-    policy = SimpleNamespace(outputs=[])
+    completion = SimpleNamespace(token_ids=[7], logprobs=None, finish_reason="stop", num_preempted=0)
+    policy = SimpleNamespace(request_id="request-0", outputs=[completion])
 
     class Engine:
         def __init__(self):
@@ -484,6 +492,7 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
 
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = Engine()
+    server.global_steps = 3
     strategy = ARStrategy(server)
     strategy._rollout_output_modalities = ["latent", "audio"]
     strategy._rollout_adapter = Adapter
@@ -496,10 +505,15 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
     rpc_result = await server.collective_rpc("update_weights_from_ipc", kwargs={"base_sync_done": True})
 
     assert result is policy
-    assert result._verl_omni_rollout_fields == {"audio_sample_rate": 24_000}
+    assert not hasattr(result, "_verl_omni_rollout_fields")
+    assert strategy._rollout_fields_by_request_id == {"request-0": {"audio_sample_rate": 24_000}}
     assert server.engine.generate_kwargs["output_modalities"] == ["latent", "audio"]
     assert server.engine.rpc_kwargs["stage_ids"] == [0]
     assert rpc_result == "rpc-result"
+
+    output = strategy.process_output(result, ar_strategy_module.SamplingParams(), {})
+    assert output.extra_fields == {"global_steps": 3, "audio_sample_rate": 24_000}
+    assert strategy._rollout_fields_by_request_id == {}
 
 
 def test_ar_strategy_preserves_qwen3_omni_thinker_only_contract():
@@ -574,17 +588,31 @@ def test_ar_strategy_writes_qwen3_omni_thinker_only_deploy_config(monkeypatch):
     server._temp_deploy_ctx.cleanup()
 
 
-def test_ar_strategy_rejects_qwen3_omni_full_multi_output_without_combiner():
-    server = SimpleNamespace(_rollout_flags={})
+def test_ar_strategy_preserves_qwen3_omni_full_without_combiner(monkeypatch):
+    monkeypatch.setattr(ar_strategy_module, "get_visible_devices_keyword", lambda: "CUDA_VISIBLE_DEVICES")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            tensor_model_parallel_size=1,
+            text_encoder_tp_size=1,
+            max_model_len=8,
+            max_num_batched_tokens=8,
+        ),
+        _rollout_flags={},
+    )
     strategy = ARStrategy(server)
 
-    with pytest.raises(ValueError, match="multiple final pipeline outputs"):
-        strategy.preprocess_engine_kwargs(
-            {
-                "pipeline_name": "qwen3_omni_moe",
-                "pipeline_mode": "full",
-            }
-        )
+    engine_kwargs = {
+        "pipeline_name": "qwen3_omni_moe",
+        "pipeline_mode": "full",
+    }
+    strategy.preprocess_engine_kwargs(engine_kwargs)
+
+    deploy_path = engine_kwargs["deploy-config"]
+    deploy = yaml.safe_load(Path(deploy_path).read_text(encoding="utf-8"))
+    assert [stage["stage_id"] for stage in deploy["stages"]] == [0, 1, 2]
+    assert strategy._rollout_output_modalities is None
+    server._temp_deploy_ctx.cleanup()
 
 
 def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):

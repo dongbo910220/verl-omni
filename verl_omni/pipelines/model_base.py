@@ -835,7 +835,12 @@ class OmniRolloutPipelineBase:
 
     @classmethod
     def combine_engine_outputs(cls, outputs: list, prompt: dict) -> tuple[Any, dict[str, Any]]:
-        """Select the policy output and collect architecture-specific fields."""
+        """Select the policy output and collect architecture-specific fields.
+
+        Overriding this hook opts an adapter into retaining and assembling
+        multiple final stage outputs. The default preserves single-output AR
+        behavior.
+        """
         if not outputs:
             raise RuntimeError("The omni rollout engine returned no outputs.")
         if len(outputs) != 1:

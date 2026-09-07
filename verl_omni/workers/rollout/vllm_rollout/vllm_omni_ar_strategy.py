@@ -64,6 +64,8 @@ class ARStrategy(OmniStrategyBase):
         self._rollout_output_modalities: list[str] | None = None
         self._weight_sync_stage_ids: list[int] | None = None
         self._stage_sampling_constraints: dict[int, dict[str, Any]] = {}
+        self._default_stage_sampling_params: tuple[Any, ...] | None = None
+        self._rollout_fields_by_request_id: dict[str, dict[str, Any]] = {}
         self._policy_stage_id = 0
         self._policy_stage_index = 0
 
@@ -132,8 +134,6 @@ class ARStrategy(OmniStrategyBase):
         stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
         stage_ids = [stage.stage_id for stage in stages]
         policy_stage_id = adapter_cls.policy_stage_id(pipeline_mode=pipeline_mode)
-        if isinstance(policy_stage_id, bool) or not isinstance(policy_stage_id, int):
-            raise TypeError(f"{adapter_cls.__name__}.policy_stage_id() must return an integer stage ID.")
         if policy_stage_id not in stage_ids:
             raise ValueError(
                 f"{adapter_cls.__name__}.policy_stage_id() returned unknown stage {policy_stage_id}; "
@@ -144,39 +144,27 @@ class ARStrategy(OmniStrategyBase):
 
         weight_sync_stage_ids = adapter_cls.weight_sync_stage_ids(pipeline_mode=pipeline_mode)
         if weight_sync_stage_ids is not None:
-            if not isinstance(weight_sync_stage_ids, list):
-                raise TypeError(f"{adapter_cls.__name__}.weight_sync_stage_ids() must return a list or None.")
-            if not weight_sync_stage_ids:
-                raise ValueError(f"{adapter_cls.__name__}.weight_sync_stage_ids() must not return an empty list.")
-            if any(isinstance(stage_id, bool) or not isinstance(stage_id, int) for stage_id in weight_sync_stage_ids):
-                raise TypeError(f"{adapter_cls.__name__}.weight_sync_stage_ids() must contain only integer stage IDs.")
-            if len(weight_sync_stage_ids) != len(set(weight_sync_stage_ids)):
-                raise ValueError(f"{adapter_cls.__name__}.weight_sync_stage_ids() must contain unique stage IDs.")
             unknown_stage_ids = sorted(set(weight_sync_stage_ids) - set(stage_ids))
             if unknown_stage_ids:
                 raise ValueError(
                     f"{adapter_cls.__name__}.weight_sync_stage_ids() returned unknown stages {unknown_stage_ids}; "
                     f"available stages are {stage_ids}."
                 )
-            weight_sync_stage_ids = list(weight_sync_stage_ids)
         self._weight_sync_stage_ids = weight_sync_stage_ids
 
         pipeline_id = adapter_cls.get_pipeline_id(pipeline_mode)
         final_output_types = [stage.final_output_type for stage in stages if stage.final_output]
-        self._rollout_output_modalities = (
-            list(dict.fromkeys(final_output_types)) if len(final_output_types) > 1 else None
-        )
         adapter_combiner = getattr(adapter_cls.combine_engine_outputs, "__func__", adapter_cls.combine_engine_outputs)
         default_combiner = getattr(
             OmniRolloutPipelineBase.combine_engine_outputs,
             "__func__",
             OmniRolloutPipelineBase.combine_engine_outputs,
         )
-        if self._rollout_output_modalities is not None and adapter_combiner is default_combiner:
-            raise ValueError(
-                f"{adapter_cls.__name__} exposes multiple final pipeline outputs but does not implement "
-                "combine_engine_outputs(); refusing to guess which output contains policy token IDs."
-            )
+        self._rollout_output_modalities = (
+            list(dict.fromkeys(final_output_types))
+            if len(final_output_types) > 1 and adapter_combiner is not default_combiner
+            else None
+        )
         self._stage_sampling_constraints = {stage.stage_id: dict(stage.sampling_constraints) for stage in stages}
         stage_extras = {
             stage.stage_id: dict(adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode))
@@ -282,10 +270,6 @@ class ARStrategy(OmniStrategyBase):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("An adapter-prepared omni prompt must contain prompt_token_ids.")
             effective_prompt_ids = prompt["prompt_token_ids"]
-            if not isinstance(effective_prompt_ids, list) or any(
-                isinstance(token_id, bool) or not isinstance(token_id, int) for token_id in effective_prompt_ids
-            ):
-                raise TypeError("An adapter-prepared omni prompt must contain prompt_token_ids as a list of integers.")
         else:
             effective_prompt_ids = prompt_ids
         max_possible_tokens = self.server.config.max_model_len - len(effective_prompt_ids)
@@ -316,9 +300,16 @@ class ARStrategy(OmniStrategyBase):
         sampling_params.setdefault("repetition_penalty", getattr(self.server.config, "repetition_penalty", 1.0))
         policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         if self._rollout_output_modalities is not None:
-            params = copy.deepcopy(self.server.engine.default_sampling_params_list)
-            if len(params) <= 1 or self._policy_stage_index >= len(params):
+            if self._default_stage_sampling_params is None:
+                self._default_stage_sampling_params = tuple(
+                    copy.deepcopy(self.server.engine.default_sampling_params_list)
+                )
+            if len(self._default_stage_sampling_params) <= 1 or self._policy_stage_index >= len(
+                self._default_stage_sampling_params
+            ):
                 raise RuntimeError("A multi-output omni rollout requires per-stage sampling parameters.")
+            params = list(self._default_stage_sampling_params)
+            params[self._policy_stage_index] = copy.copy(params[self._policy_stage_index])
             constrained = self._stage_sampling_constraints[self._policy_stage_id]
             for field in {"max_tokens", *sampling_params} - constrained.keys():
                 setattr(params[self._policy_stage_index], field, getattr(policy_params, field))
@@ -363,7 +354,7 @@ class ARStrategy(OmniStrategyBase):
         if self._rollout_adapter is None:
             raise RuntimeError("Retaining multiple stage outputs requires a registered rollout adapter.")
         final_res, rollout_fields = self._rollout_adapter.combine_engine_outputs(outputs, prompt)
-        final_res._verl_omni_rollout_fields = rollout_fields
+        self._rollout_fields_by_request_id[request_id] = rollout_fields
         return final_res
 
     def process_output(
@@ -375,13 +366,20 @@ class ARStrategy(OmniStrategyBase):
         if final_res is None:
             raise RuntimeError("AR mode: vLLM-Omni engine yielded no output for the prompt.")
 
+        rollout_fields = {}
+        if self._rollout_output_modalities is not None:
+            request_id = final_res.request_id
+            try:
+                rollout_fields = self._rollout_fields_by_request_id.pop(request_id)
+            except KeyError:
+                raise RuntimeError(f"Missing retained rollout fields for request {request_id!r}.") from None
+
         req_output = getattr(final_res, "request_output", None) or final_res
         if not req_output.outputs:
             raise RuntimeError("AR mode expects outputs with token IDs, but got None or empty.")
 
         extra_fields = {"global_steps": self.server.global_steps}
-        if self._rollout_output_modalities is not None:
-            extra_fields.update(final_res._verl_omni_rollout_fields)
+        extra_fields.update(rollout_fields)
         token_ids = req_output.outputs[0].token_ids
         log_probs = None
         policy_params = params[self._policy_stage_index] if isinstance(params, list) else params

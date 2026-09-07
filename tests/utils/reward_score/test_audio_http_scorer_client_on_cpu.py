@@ -62,6 +62,7 @@ def test_request_serialization_preserves_waveform_prompt_and_scalar_metadata():
     [
         (None, "expects solution_audio"),
         (([], 24_000), "empty waveform"),
+        ((np.zeros((2, 4), dtype=np.float32), 24_000), "1D mono waveform"),
         (([float("inf")], 24_000), "non-finite waveform"),
         (([0.0], 0), "positive integer"),
     ],

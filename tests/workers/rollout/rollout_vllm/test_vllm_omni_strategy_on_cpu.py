@@ -119,18 +119,19 @@ def test_strategies_preserve_platform_worker_extensions():
     assert DiffusionStrategy(server).worker_extension_cls("npu").endswith("vLLMOmniNPUColocateWorkerExtension")
 
 
-def test_optional_rollout_hooks_preserve_existing_ar_defaults():
+@pytest.mark.parametrize("adapter_cls", [OmniRolloutPipelineBase, Qwen3OmniRolloutAdapter])
+def test_optional_rollout_hooks_preserve_existing_ar_defaults(adapter_cls):
     first, final = object(), object()
 
-    assert OmniRolloutPipelineBase.supports_async_chunk is True
-    assert OmniRolloutPipelineBase.weight_sync_stage_ids() is None
-    assert OmniRolloutPipelineBase.policy_stage_id() == 0
-    assert OmniRolloutPipelineBase.prepare_engine_prompt([], None, {}) is None
-    assert OmniRolloutPipelineBase.combine_engine_outputs([final], {}) == (final, {})
+    assert adapter_cls.supports_async_chunk is True
+    assert adapter_cls.weight_sync_stage_ids("full") is None
+    assert adapter_cls.policy_stage_id("full") == 0
+    assert adapter_cls.prepare_engine_prompt([], None, {}) is None
+    assert adapter_cls.combine_engine_outputs([final], {}) == (final, {})
     with pytest.raises(NotImplementedError, match="multiple final outputs"):
-        OmniRolloutPipelineBase.combine_engine_outputs([first, final], {})
+        adapter_cls.combine_engine_outputs([first, final], {})
     with pytest.raises(RuntimeError, match="no outputs"):
-        OmniRolloutPipelineBase.combine_engine_outputs([], {})
+        adapter_cls.combine_engine_outputs([], {})
 
 
 def test_ar_strategy_preserves_prompt_and_sampling_preprocessing():
@@ -311,8 +312,8 @@ def test_ar_strategy_resolves_nonzero_policy_and_weight_sync_stages(monkeypatch)
 
     strategy.preprocess_engine_kwargs(engine_kwargs)
 
-    assert strategy._policy_stage_id == 1
     assert strategy._policy_stage_index == 1
+    assert strategy._policy_sampling_constraints == {}
     assert strategy._weight_sync_stage_ids == [1]
     server._temp_deploy_ctx.cleanup()
 
@@ -396,9 +397,8 @@ def test_ar_strategy_prepares_sampling_params_for_nonzero_policy_stage():
     strategy = ARStrategy(server)
     strategy._rollout_adapter = Adapter
     strategy._rollout_output_modalities = ["latent", "audio"]
-    strategy._policy_stage_id = 1
     strategy._policy_stage_index = 1
-    strategy._stage_sampling_constraints = {1: {}}
+    strategy._policy_sampling_constraints = {}
 
     prompt, params = strategy.preprocess_input(
         [5, 6],

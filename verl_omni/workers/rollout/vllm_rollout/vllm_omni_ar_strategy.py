@@ -60,14 +60,11 @@ class ARStrategy(OmniStrategyBase):
     def __init__(self, server: Any) -> None:
         super().__init__(server)
         self._rollout_adapter: type[OmniRolloutPipelineBase] | None = None
-        self._pipeline_mode = "thinker_only"
         self._rollout_output_modalities: list[str] | None = None
         self._weight_sync_stage_ids: list[int] | None = None
-        self._stage_sampling_constraints: dict[int, dict[str, Any]] = {}
-        self._default_stage_sampling_params: tuple[Any, ...] | None = None
         self._rollout_fields_by_request_id: dict[str, dict[str, Any]] = {}
-        self._policy_stage_id = 0
         self._policy_stage_index = 0
+        self._policy_sampling_constraints: dict[str, Any] = {}
 
     def validate_configs(self) -> None:
         if self.server.config.max_model_len is None:
@@ -87,7 +84,7 @@ class ARStrategy(OmniStrategyBase):
         engine_kwargs.pop("custom_pipeline", None)
         # TODO (mike): drop this later. It should be inferred from the model config.
         pipeline_name = engine_kwargs.pop("pipeline_name", None)
-        self._pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
+        pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
 
         adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
         if adapter_cls is not None:
@@ -100,9 +97,9 @@ class ARStrategy(OmniStrategyBase):
                     "cannot be replayed by its actor adapter."
                 )
             self._rollout_adapter = adapter_cls
-            self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, self._pipeline_mode)
-            self.server._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=self._pipeline_mode)
-            adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=self._pipeline_mode)
+            self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, pipeline_mode)
+            self.server._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=pipeline_mode)
+            adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=pipeline_mode)
             if adapter_overrides:
                 hf_overrides = engine_kwargs.get("hf_overrides", {})
                 if isinstance(hf_overrides, str):
@@ -139,8 +136,8 @@ class ARStrategy(OmniStrategyBase):
                 f"{adapter_cls.__name__}.policy_stage_id() returned unknown stage {policy_stage_id}; "
                 f"available stages are {stage_ids}."
             )
-        self._policy_stage_id = policy_stage_id
         self._policy_stage_index = stage_ids.index(policy_stage_id)
+        self._policy_sampling_constraints = dict(stages[self._policy_stage_index].sampling_constraints)
 
         weight_sync_stage_ids = adapter_cls.weight_sync_stage_ids(pipeline_mode=pipeline_mode)
         if weight_sync_stage_ids is not None:
@@ -165,7 +162,6 @@ class ARStrategy(OmniStrategyBase):
             if len(final_output_types) > 1 and adapter_combiner is not default_combiner
             else None
         )
-        self._stage_sampling_constraints = {stage.stage_id: dict(stage.sampling_constraints) for stage in stages}
         stage_extras = {
             stage.stage_id: dict(adapter_cls.get_stage_engine_extras(stage.stage_id, pipeline_mode=pipeline_mode))
             for stage in stages
@@ -300,18 +296,14 @@ class ARStrategy(OmniStrategyBase):
         sampling_params.setdefault("repetition_penalty", getattr(self.server.config, "repetition_penalty", 1.0))
         policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         if self._rollout_output_modalities is not None:
-            if self._default_stage_sampling_params is None:
-                self._default_stage_sampling_params = tuple(
-                    copy.deepcopy(self.server.engine.default_sampling_params_list)
-                )
-            if len(self._default_stage_sampling_params) <= 1 or self._policy_stage_index >= len(
-                self._default_stage_sampling_params
+            default_stage_sampling_params = self.server.engine.default_sampling_params_list
+            if len(default_stage_sampling_params) <= 1 or self._policy_stage_index >= len(
+                default_stage_sampling_params
             ):
                 raise RuntimeError("A multi-output omni rollout requires per-stage sampling parameters.")
-            params = list(self._default_stage_sampling_params)
+            params = list(default_stage_sampling_params)
             params[self._policy_stage_index] = copy.copy(params[self._policy_stage_index])
-            constrained = self._stage_sampling_constraints[self._policy_stage_id]
-            for field in {"max_tokens", *sampling_params} - constrained.keys():
+            for field in {"max_tokens", *sampling_params} - self._policy_sampling_constraints.keys():
                 setattr(params[self._policy_stage_index], field, getattr(policy_params, field))
         else:
             params = policy_params

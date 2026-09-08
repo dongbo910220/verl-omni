@@ -107,11 +107,17 @@ Optional overrides fall into four groups:
 - Policy and resource behavior: `policy_stage_id` identifies the stage whose
   sampling parameters and logprobs define the trained policy;
   `weight_sync_stage_ids` identifies the stages that receive actor weights.
-- Request construction: `prepare_engine_prompt`.
+- Request construction: `prepare_engine_prompt`. When this hook returns a
+  custom prompt, the adapter must include any non-`None`
+  `mm_processor_kwargs`; the shared strategy adds them automatically only to
+  its default prompt.
 - Multi-stage output assembly: override `combine_engine_outputs` to opt into
   retaining outputs from every stage marked `final_output` in the pipeline
   topology. Adapters that keep the default hook preserve the engine's existing
-  single-output behavior.
+  single-output behavior. A custom combiner must also handle abort outputs with
+  empty token IDs and, pending
+  [vllm-omni#6973](https://github.com/vllm-project/vllm-omni/issues/6973), an
+  empty output list.
 
 Their defaults preserve the existing single-output AR behavior. Override only
 the hooks required by the model. A stage-split adapter may, for example, limit

@@ -318,6 +318,56 @@ def test_ar_strategy_resolves_nonzero_policy_and_weight_sync_stages(monkeypatch)
     server._temp_deploy_ctx.cleanup()
 
 
+def test_ar_strategy_moves_capacity_overrides_to_each_stage(monkeypatch):
+    stages = [
+        SimpleNamespace(stage_id=0, final_output=False, final_output_type=None, sampling_constraints={}),
+        SimpleNamespace(stage_id=1, final_output=True, final_output_type="latent", sampling_constraints={}),
+    ]
+
+    class Adapter(OmniRolloutPipelineBase):
+        @classmethod
+        def build_stage_configs(cls, pipeline_mode="thinker_only"):
+            return stages
+
+        @classmethod
+        def get_pipeline_id(cls, pipeline_mode="thinker_only"):
+            return "test_pipeline"
+
+        @classmethod
+        def get_stage_engine_extras(cls, stage_id, pipeline_mode="thinker_only"):
+            return {"max_model_len": 65536} if stage_id == 1 else {}
+
+    monkeypatch.setattr(ar_strategy_module.OmniRolloutPipelineBase, "get_class", lambda pipeline_name: Adapter)
+    monkeypatch.setattr(ar_strategy_module, "get_visible_devices_keyword", lambda: "CUDA_VISIBLE_DEVICES")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            tensor_model_parallel_size=1,
+            text_encoder_tp_size=1,
+            max_model_len=4096,
+            max_num_batched_tokens=8192,
+        ),
+        _rollout_flags={},
+    )
+    strategy = ARStrategy(server)
+    engine_kwargs = {"pipeline_name": "adapter"}
+
+    strategy.preprocess_engine_kwargs(engine_kwargs)
+
+    deploy = yaml.safe_load(Path(engine_kwargs["deploy-config"]).read_text(encoding="utf-8"))
+    assert engine_kwargs["max_model_len"] is None
+    assert engine_kwargs["max_num_batched_tokens"] is None
+    assert deploy["stages"][0]["engine_extras"] == {
+        "max_model_len": 4096,
+        "max_num_batched_tokens": 8192,
+    }
+    assert deploy["stages"][1]["engine_extras"] == {
+        "max_model_len": 65536,
+        "max_num_batched_tokens": 8192,
+    }
+    server._temp_deploy_ctx.cleanup()
+
+
 @pytest.mark.parametrize(
     ("policy_stage_id", "weight_sync_stage_ids", "message"),
     [
@@ -509,7 +559,7 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
     assert strategy._rollout_fields_by_request_id == {"request-0": {"audio_sample_rate": 24_000}}
     assert server.engine.generate_kwargs["output_modalities"] == ["latent", "audio"]
     assert server.engine.rpc_kwargs["stage_ids"] == [0]
-    assert rpc_result == "rpc-result"
+    assert rpc_result is None
 
     output = strategy.process_output(result, ar_strategy_module.SamplingParams(), {})
     assert output.extra_fields == {"global_steps": 3, "audio_sample_rate": 24_000}

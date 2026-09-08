@@ -72,12 +72,10 @@ GROUP_PATTERNS = {
         "tests/pipelines/test_qwen3_tts*",
         "tests/special_e2e/*omni*",
         "tests/special_e2e/*qwen3_tts*",
-        "tests/utils/reward_score/test_audio_http_scorer_client_on_cpu.py",
         "verl_omni/models/transformers/qwen3_omni_thinker.py",
         "verl_omni/pipelines/qwen3_tts/**",
         "verl_omni/trainer/config/omni/**",
         "verl_omni/trainer/omni/**",
-        "verl_omni/utils/reward_score/audio_http_scorer_client.py",
     ),
     "ci-e2e-diffusion": (
         "tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh",

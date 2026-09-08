@@ -31,7 +31,10 @@ from vllm import SamplingParams
 from verl_omni.agent_loop.single_turn_agent_loop import OmniSingleTurnAgentLoop
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_tts import omni_rollout_adapter
-from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import Qwen3TTSRolloutAdapter
+from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import (
+    Qwen3TTSRolloutAdapter,
+    prepare_code2wav_input_for_policy_replay,
+)
 from verl_omni.pipelines.qwen3_tts.rollout_utils import QWEN3_TTS_REPLAY_KEY
 from verl_omni.pipelines.qwen3_tts.talker_training_adapter import Qwen3TTSTalkerAdapter
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
@@ -131,9 +134,24 @@ def test_rollout_adapter_builds_unique_prompt_and_scopes_weight_sync(tmp_path):
     assert first["additional_information"]["text"] == ["first text"]
     assert first["cache_salt"] != second["cache_salt"]
     assert Qwen3TTSRolloutAdapter.weight_sync_stage_ids("full") == [0]
-    assert [
-        stage.final_output_type for stage in Qwen3TTSRolloutAdapter.build_stage_configs("full") if stage.final_output
-    ] == ["latent", "audio"]
+    stages = Qwen3TTSRolloutAdapter.build_stage_configs("full")
+    assert [stage.final_output_type for stage in stages if stage.final_output] == ["latent", "audio"]
+    assert stages[0].sampling_constraints["min_tokens"] == 2
+    assert stages[1].sync_process_input_func.endswith(".prepare_code2wav_input_for_policy_replay")
+
+
+def test_code2wav_placeholder_uses_retained_policy_token_count_without_mutation():
+    completion = SimpleNamespace(
+        cumulative_token_ids=[101, 201, 202, 2150],
+        multimodal_output=None,
+    )
+    source_output = SimpleNamespace(finished=True, outputs=[completion])
+
+    prepared = prepare_code2wav_input_for_policy_replay([source_output])
+
+    assert len(prepared) == 1
+    assert len(prepared[0]["prompt_token_ids"]) == 3 * 16
+    assert completion.multimodal_output is None
 
 
 def test_ar_strategy_resolves_qwen3_tts_adapter(monkeypatch):

@@ -16,6 +16,7 @@
 import hashlib
 from dataclasses import replace
 from functools import lru_cache
+from types import SimpleNamespace
 
 import torch
 from vllm_omni.config.pipeline_registry import register_pipeline
@@ -25,6 +26,7 @@ from vllm_omni.model_executor.models.qwen3_tts.pipeline import QWEN3_TTS_PIPELIN
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_tts.rollout_utils import QWEN3_TTS_REPLAY_KEY, align_audio_codes
 from verl_omni.pipelines.qwen3_tts.talker_forward import (
+    NUM_CODEBOOKS,
     TEXT_PROMPT_TRAILER_TOKENS,
     build_assistant_text,
     load_speaker_xvector,
@@ -32,12 +34,76 @@ from verl_omni.pipelines.qwen3_tts.talker_forward import (
 )
 
 _PIPELINE_ID = "qwen3_tts_rl"
+
+
+def prepare_code2wav_input_for_policy_replay(
+    source_outputs: list,
+    prompt=None,
+    _requires_multimodal_data: bool = False,
+) -> list:
+    """Size Code2Wav placeholders from the retained Talker policy trajectory.
+
+    The pinned sync engine keeps codec values on the worker connector while
+    the orchestrator sees only cumulative policy tokens. Code2Wav still needs
+    a placeholder sized to 16 codebooks for every generated codec frame.
+    """
+    from vllm_omni.model_executor.stage_input_processors.qwen3_tts import talker2code2wav_token_only
+
+    normalized_outputs = []
+    for source_output in source_outputs:
+        completions = getattr(source_output, "outputs", None)
+        if not getattr(source_output, "finished", False):
+            normalized_outputs.append(source_output)
+            continue
+        if not completions:
+            raise RuntimeError("Qwen3-TTS Talker finished without a completion.")
+
+        completion = completions[0]
+        token_ids = list(getattr(completion, "cumulative_token_ids", None) or [])
+        if len(token_ids) < 2:
+            raise RuntimeError("Qwen3-TTS Talker produced no codec frames for Code2Wav.")
+        frame_count = len(token_ids) - 1
+        # This tensor supplies only the placeholder shape. The worker
+        # connector sends the actual 16-codebook values to Code2Wav.
+        multimodal_output = {
+            "codes": {"audio": torch.ones((frame_count, NUM_CODEBOOKS), dtype=torch.long)},
+        }
+
+        completion_proxy = SimpleNamespace(
+            cumulative_token_ids=token_ids,
+            multimodal_output=multimodal_output,
+        )
+        normalized_outputs.append(
+            SimpleNamespace(
+                finished=source_output.finished,
+                outputs=[completion_proxy],
+            )
+        )
+
+    return talker2code2wav_token_only(
+        normalized_outputs,
+        prompt=prompt,
+        _requires_multimodal_data=_requires_multimodal_data,
+    )
+
+
 QWEN3_TTS_RL_PIPELINE = PipelineConfig(
     model_type=_PIPELINE_ID,
     model_arch=QWEN3_TTS_PIPELINE.model_arch,
     stages=(
-        replace(QWEN3_TTS_PIPELINE.stages[0], final_output=True, final_output_type="latent"),
-        QWEN3_TTS_PIPELINE.stages[1],
+        replace(
+            QWEN3_TTS_PIPELINE.stages[0],
+            final_output=True,
+            final_output_type="latent",
+            sampling_constraints={
+                **QWEN3_TTS_PIPELINE.stages[0].sampling_constraints,
+                "min_tokens": 2,
+            },
+        ),
+        replace(
+            QWEN3_TTS_PIPELINE.stages[1],
+            sync_process_input_func=f"{__name__}.prepare_code2wav_input_for_policy_replay",
+        ),
     ),
 )
 

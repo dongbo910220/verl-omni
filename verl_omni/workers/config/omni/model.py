@@ -170,8 +170,12 @@ class OmniModelConfig(BaseConfig):
         attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
         from verl_omni.pipelines.model_base import OmniModelBase
 
-        adapter_cls = OmniModelBase.get_class_by_name(self.architecture, self.model_stage, self.external_lib)
-        adapter_cls.register_auto_classes()
+        if self.load_tokenizer:
+            adapter_cls = OmniModelBase.get_class_by_name(self.architecture, self.model_stage, self.external_lib)
+        else:
+            adapter_cls = OmniModelBase.peek_class(self.architecture, self.model_stage)
+        if adapter_cls is not None:
+            adapter_cls.register_auto_classes()
         self.hf_config = AutoConfig.from_pretrained(
             self.local_hf_config_path,
             trust_remote_code=self.trust_remote_code,

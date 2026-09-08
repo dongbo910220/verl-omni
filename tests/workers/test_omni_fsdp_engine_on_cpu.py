@@ -457,26 +457,25 @@ def test_build_module_calls_adapter_configure_model(architecture, model_stage):
         assert result is fake_configured_module
 
 
-def test_build_module_uses_text_to_waveform_auto_model_for_talker():
-    from transformers import AutoModelForTextToWaveform
-
+def test_build_module_calls_adapter_selected_auto_model_loader():
     omni_impl = _get_omni_impl_module()
     model_config = _make_mock_model_config(
-        architecture="Qwen3TTSForConditionalGeneration",
+        architecture="FutureOmniForConditionalGeneration",
         model_stage="talker",
     )
     loaded_module = MagicMock(spec=torch.nn.Module)
     loaded_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
     configured_module = MagicMock(spec=torch.nn.Module)
     configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
+    auto_model_cls = MagicMock()
+    auto_model_cls.from_pretrained.return_value = loaded_module
     adapter_cls = MagicMock()
-    adapter_cls.auto_model_class = AutoModelForTextToWaveform
+    adapter_cls.auto_model_class = auto_model_cls
     adapter_cls.configure_model.return_value = configured_module
     model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
 
     with (
         patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
-        patch.object(AutoModelForTextToWaveform, "from_pretrained", return_value=loaded_module) as load,
         patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
         patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
         patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
@@ -490,7 +489,7 @@ def test_build_module_uses_text_to_waveform_auto_model_for_talker():
 
         result = engine._build_module()
 
-    load.assert_called_once_with(
+    auto_model_cls.from_pretrained.assert_called_once_with(
         pretrained_model_name_or_path=model_config.local_path,
         torch_dtype=torch.float32,
         config=model_config.hf_config,

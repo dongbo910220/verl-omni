@@ -513,6 +513,11 @@ class OmniModelBase(ABC):
         )
 
     @classmethod
+    def peek_class(cls, architecture: str, stage: str) -> Optional[type["OmniModelBase"]]:
+        """Return the registered adapter for ``(architecture, stage)`` or ``None``."""
+        return cls._registry.get((architecture, stage))
+
+    @classmethod
     def get_class_by_name(
         cls,
         architecture: str,
@@ -758,6 +763,11 @@ class OmniRolloutPipelineBase:
         return None
 
     @classmethod
+    def policy_stage_id(cls, pipeline_mode="thinker_only") -> int:
+        """Return the stage whose sampling parameters and logprobs define the policy."""
+        return 0
+
+    @classmethod
     def get_pipeline_id(cls, pipeline_mode: str = "thinker_only") -> str:
         """Return the vLLM-Omni pipeline model_type for *pipeline_mode*.
 
@@ -825,7 +835,12 @@ class OmniRolloutPipelineBase:
 
     @classmethod
     def combine_engine_outputs(cls, outputs: list, prompt: dict) -> tuple[Any, dict[str, Any]]:
-        """Select the policy output and collect architecture-specific fields."""
+        """Select the policy output and collect architecture-specific fields.
+
+        Overriding this hook opts an adapter into retaining and assembling
+        multiple final stage outputs. The default preserves single-output AR
+        behavior.
+        """
         if not outputs:
             raise RuntimeError("The omni rollout engine returned no outputs.")
         if len(outputs) != 1:

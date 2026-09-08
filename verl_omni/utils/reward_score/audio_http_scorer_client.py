@@ -49,7 +49,10 @@ def _serialize_request(solution_audio, ground_truth: str, extra_info: dict | Non
     if not isinstance(solution_audio, tuple) or len(solution_audio) != 2:
         raise TypeError("Audio HTTP scorer expects solution_audio=(waveform, sample_rate).")
     waveform, sample_rate = solution_audio
-    waveform = np.asarray(waveform, dtype="<f4").reshape(-1)
+    waveform = np.asarray(waveform, dtype="<f4")
+    if waveform.ndim != 1:
+        raise ValueError(f"Audio HTTP scorer expects a 1D mono waveform, got shape {tuple(waveform.shape)}.")
+    waveform = waveform.reshape(-1)
     if waveform.size == 0:
         raise ValueError("Audio HTTP scorer received an empty waveform.")
     if not np.isfinite(waveform).all():
@@ -77,10 +80,13 @@ def _validate_response(payload: Any) -> dict:
         raise RuntimeError(f"Audio scorer error: {payload['error']}")
     if "score" not in payload:
         raise RuntimeError("Audio scorer response is missing 'score'.")
+    raw_score = payload["score"]
+    if isinstance(raw_score, bool) or not isinstance(raw_score, int | float):
+        raise RuntimeError(f"Audio scorer returned an invalid score: {raw_score!r}.")
     try:
-        score = float(payload["score"])
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"Audio scorer returned an invalid score: {payload['score']!r}.") from exc
+        score = float(raw_score)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Audio scorer returned an invalid score: {raw_score!r}.") from exc
     if not math.isfinite(score):
         raise RuntimeError(f"Audio scorer returned a non-finite score: {score!r}.")
 
@@ -101,9 +107,11 @@ async def _session() -> aiohttp.ClientSession:
     loop = asyncio.get_running_loop()
     session = getattr(compute_score, "_session", None)
     session_loop = getattr(compute_score, "_session_loop", None)
-    if session is None or session.closed or session_loop is not loop:
-        if session is not None and not session.closed:
-            await session.close()
+    if session is not None and not session.closed:
+        if session_loop is not loop:
+            raise RuntimeError("Audio HTTP scorer session cannot be shared across event loops.")
+        return session
+    if session is None or session.closed:
         session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None))
         compute_score._session = session
         compute_score._session_loop = loop
@@ -119,7 +127,7 @@ async def _request_score(server_url: str, payload: dict, timeout: float) -> dict
             timeout=aiohttp.ClientTimeout(total=timeout),
         ) as response:
             if response.status != 200:
-                detail = await response.text()
+                detail = await response.text(errors="replace")
                 error = f"Audio scorer returned HTTP {response.status}: {detail}"
                 if response.status in {408, 429} or 500 <= response.status < 600:
                     raise _RetryableHTTPError(error)
@@ -128,7 +136,7 @@ async def _request_score(server_url: str, payload: dict, timeout: float) -> dict
                 result = await response.json(content_type=None)
             except (aiohttp.ContentTypeError, ValueError) as exc:
                 raise RuntimeError("Audio scorer returned malformed JSON.") from exc
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise _RetryableHTTPError(f"Audio scorer timed out after {timeout} seconds.") from exc
     return _validate_response(result)
 
@@ -162,7 +170,7 @@ async def compute_score(
         raise ValueError("retry_backoff must be a finite number.")
     if retry_backoff < 0:
         raise ValueError("retry_backoff must be non-negative.")
-    payload = _serialize_request(solution_audio, ground_truth, extra_info)
+    payload = await asyncio.to_thread(_serialize_request, solution_audio, ground_truth, extra_info)
 
     last_error = None
     for attempt in range(max_retries + 1):

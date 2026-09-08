@@ -14,6 +14,8 @@
 """CPU tests for generic waveform reward routing."""
 
 import importlib.util
+import threading
+from functools import partial
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -22,6 +24,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 from verl import DataProto
+from verl.utils.reward_score import default_compute_score
 
 
 def _load_audio_reward_manager():
@@ -107,6 +110,12 @@ def test_run_single_rejects_multi_sample_batch():
         manager.loop.run_until_complete(manager.run_single(data))
 
 
+@pytest.mark.parametrize("compute_score", [default_compute_score, partial(default_compute_score)])
+def test_default_text_reward_function_is_rejected(compute_score):
+    with pytest.raises(ValueError, match="custom_reward_function"):
+        _manager(compute_score)
+
+
 def test_run_single_passes_waveform_and_returns_diagnostics():
     def compute_score(data_source, solution_audio, ground_truth, extra_info):
         waveform, sample_rate = solution_audio
@@ -126,6 +135,29 @@ def test_run_single_passes_waveform_and_returns_diagnostics():
         "reward_score": 0.75,
         "reward_extra_info": {"pinyin_error_rate": 0.1},
     }
+
+
+def test_run_single_forwards_reward_router_arguments():
+    expected_reward_model_tokenizer = MagicMock()
+
+    def compute_score(reward_router_address, reward_model_tokenizer, model_name, **kwargs):
+        assert reward_router_address == "reward-router:8000"
+        assert reward_model_tokenizer is expected_reward_model_tokenizer
+        assert model_name == "reward-model"
+        return 0.5
+
+    config = OmegaConf.create({"reward": {"reward_model": {"model_path": "reward-model"}}})
+    manager = AudioRewardManager(
+        config,
+        MagicMock(),
+        compute_score=compute_score,
+        reward_router_address="reward-router:8000",
+        reward_model_tokenizer=expected_reward_model_tokenizer,
+    )
+
+    result = manager.loop.run_until_complete(manager.run_single(_data(np.ones(8, dtype=np.float32))))
+
+    assert result["reward_score"] == 0.5
 
 
 def test_run_single_reads_finalized_top_level_audio_layout():
@@ -195,6 +227,25 @@ async def test_async_score_function_is_supported():
     result = await _manager(compute_score).run_single(_data(torch.ones(32)))
 
     assert result == {"reward_score": -0.25, "reward_extra_info": {"judge_margin": 3.0}}
+
+
+@pytest.mark.asyncio
+async def test_waveform_extraction_runs_off_the_event_loop(monkeypatch):
+    event_loop_thread = threading.get_ident()
+    extraction_threads = []
+
+    def extract_audio(extra_info):
+        extraction_threads.append(threading.get_ident())
+        return np.zeros(8, dtype=np.float32), 24_000
+
+    async def compute_score(**kwargs):
+        return 0.5
+
+    monkeypatch.setattr(AudioRewardManager, "_extract_audio", staticmethod(extract_audio))
+    result = await _manager(compute_score).run_single(_data(np.ones(8, dtype=np.float32)))
+
+    assert result["reward_score"] == 0.5
+    assert extraction_threads and extraction_threads[0] != event_loop_thread
 
 
 @pytest.mark.parametrize("score", [float("nan"), float("inf"), -float("inf")])

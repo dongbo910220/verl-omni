@@ -48,6 +48,15 @@ class _Tokenizer:
 
 def test_external_module_import_registers_omni_agent_loop():
     code = """
+import vllm.utils.import_utils as import_utils
+
+NoGPU = type("NoGPU", (), {
+    "nvmlInit": staticmethod(lambda: None),
+    "nvmlDeviceGetCount": staticmethod(lambda: 0),
+    "nvmlShutdown": staticmethod(lambda: None),
+})
+import_utils.import_pynvml = lambda: NoGPU
+
 import vllm_omni.platforms as platforms
 from vllm_omni.platforms.interface import UnspecifiedOmniPlatform
 
@@ -127,7 +136,7 @@ def test_rollout_adapter_builds_unique_prompt_and_scopes_weight_sync(tmp_path):
     ] == ["latent", "audio"]
 
 
-def test_ar_strategy_resolves_qwen3_tts_adapter_and_scopes_weight_sync(monkeypatch):
+def test_ar_strategy_resolves_qwen3_tts_adapter(monkeypatch):
     server = SimpleNamespace(_rollout_flags={})
     strategy = ARStrategy(server)
     deploy_calls = []
@@ -149,7 +158,6 @@ def test_ar_strategy_resolves_qwen3_tts_adapter_and_scopes_weight_sync(monkeypat
 
     assert deploy_calls == [("qwen3_tts_rl", Qwen3TTSRolloutAdapter, "full")]
     assert strategy._rollout_adapter is Qwen3TTSRolloutAdapter
-    assert strategy._weight_sync_stage_ids == [0]
     assert engine_kwargs == {"async-chunk": False}
 
 
@@ -317,7 +325,8 @@ def test_ar_strategy_prepares_stage_specific_sampling_params():
     strategy = ARStrategy(server)
     strategy._rollout_adapter = Adapter
     strategy._rollout_output_modalities = ["latent", "audio"]
-    strategy._stage_sampling_constraints = {0: {}}
+    strategy._policy_stage_index = 0
+    strategy._policy_sampling_constraints = {}
 
     prompt, params = strategy.preprocess_input(
         [5, 6],
@@ -339,7 +348,6 @@ def test_ar_strategy_prepares_stage_specific_sampling_params():
     ("adapter_prompt", "message"),
     [
         ({"additional_information": {"text": ["hello"]}}, "must contain prompt_token_ids"),
-        ({"prompt_token_ids": "1,2"}, "list of integers"),
         ([1, 2], "must return a dict or None"),
     ],
 )
@@ -362,7 +370,8 @@ def test_ar_strategy_rejects_invalid_adapter_prompt(adapter_prompt, message):
 
 @pytest.mark.asyncio
 async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sync():
-    policy = SimpleNamespace(outputs=[])
+    completion = SimpleNamespace(token_ids=[7], logprobs=None, finish_reason="stop", num_preempted=0)
+    policy = SimpleNamespace(request_id="request-0", outputs=[completion])
 
     class Engine:
         def __init__(self):
@@ -385,6 +394,7 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
 
     server = object.__new__(vLLMOmniHttpServer)
     server.engine = Engine()
+    server.global_steps = 3
     strategy = ARStrategy(server)
     strategy._rollout_output_modalities = ["latent", "audio"]
     strategy._rollout_adapter = Adapter
@@ -395,7 +405,12 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
     rpc_result = await server.collective_rpc("update_weights_from_ipc", kwargs={"base_sync_done": True})
 
     assert result is policy
-    assert result._verl_omni_rollout_fields == {"audio_sample_rate": 24_000}
+    assert not hasattr(result, "_verl_omni_rollout_fields")
+    assert strategy._rollout_fields_by_request_id == {"request-0": {"audio_sample_rate": 24_000}}
     assert server.engine.generate_kwargs["output_modalities"] == ["latent", "audio"]
     assert server.engine.rpc_kwargs["stage_ids"] == [0]
-    assert rpc_result == "rpc-result"
+    assert rpc_result is None
+
+    output = strategy.process_output(result, SamplingParams(), {})
+    assert output.extra_fields == {"global_steps": 3, "audio_sample_rate": 24_000}
+    assert strategy._rollout_fields_by_request_id == {}

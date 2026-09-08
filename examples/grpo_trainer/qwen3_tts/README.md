@@ -144,7 +144,8 @@ human listening evaluation.
 The CI-oriented wrapper at
 [`tests/special_e2e/run_qwen3_tts_grpo_smoke.sh`](../../../tests/special_e2e/run_qwen3_tts_grpo_smoke.sh)
 creates deterministic fixtures, uses an in-process CPU duration reward, and runs
-two updates with the official 0.6B Base model.
+two updates with a pinned tiny-random checkpoint rebuilt for the 16-codebook
+actor contract.
 
 ## References
 

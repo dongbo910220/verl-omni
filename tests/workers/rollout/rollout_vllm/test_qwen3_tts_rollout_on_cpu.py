@@ -269,6 +269,26 @@ def test_rollout_adapter_combines_policy_codes_and_waveform():
     assert fields["tts_text"] == "first text"
 
 
+def test_rollout_adapter_rejects_non_mono_waveform():
+    token_ids = [101, 102, 2150]
+    generated = torch.arange(3 * 16, dtype=torch.long).reshape(3, 16) + 1
+    generated[:, 0] = torch.tensor(token_ids)
+    policy = SimpleNamespace(
+        stage_id=0,
+        outputs=[SimpleNamespace(token_ids=token_ids)],
+        multimodal_output={"codes": {"audio": torch.cat((torch.zeros(12, 16), generated))}},
+    )
+    decoder = SimpleNamespace(
+        stage_id=1,
+        outputs=[],
+        multimodal_output={"audio": torch.ones(2, 2400), "sr": 24_000},
+    )
+    prompt = {"additional_information": {"text": ["first text"]}}
+
+    with pytest.raises(RuntimeError, match="one-dimensional mono waveform"):
+        Qwen3TTSRolloutAdapter.combine_engine_outputs([policy, decoder], prompt)
+
+
 def test_rollout_adapter_prepares_actor_policy_sequence():
     codes = torch.arange(5 * 16, dtype=torch.long).reshape(5, 16)
     output = SimpleNamespace(

@@ -175,10 +175,12 @@ class Qwen3TTSRolloutAdapter(OmniRolloutPipelineBase):
 
         try:
             audio_codes = torch.as_tensor(policy_output.multimodal_output["codes"]["audio"]).detach().cpu()
-            waveform = torch.as_tensor(decoder_output.multimodal_output["audio"]).detach().cpu().float().reshape(-1)
+            waveform = torch.as_tensor(decoder_output.multimodal_output["audio"]).detach().cpu().float()
             sample_rate = torch.as_tensor(decoder_output.multimodal_output["sr"])
         except (KeyError, TypeError, ValueError, RuntimeError) as error:
             raise RuntimeError("Qwen3-TTS rollout output does not match the pinned two-stage contract.") from error
+        if waveform.ndim != 1:
+            raise RuntimeError("Qwen3-TTS stage 1 must return a one-dimensional mono waveform.")
         if waveform.numel() == 0:
             raise RuntimeError("Qwen3-TTS stage 1 returned an empty waveform.")
         if sample_rate.numel() != 1:

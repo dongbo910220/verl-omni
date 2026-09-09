@@ -66,7 +66,6 @@ GROUP_PATTERNS = {
         "verl_omni/workers/**",
     ),
     "ci-e2e-omni": (
-        ".github/qwen_tts_pin.txt",
         "examples/grpo_trainer/qwen3_tts/**",
         "tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh",
         "tests/pipelines/test_qwen3_tts*",

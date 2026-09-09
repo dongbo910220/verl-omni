@@ -14,7 +14,6 @@ on:
       - "tests/special_e2e/**"
       - "pyproject.toml"
       - .github/workflows/gpu_smoke.yml
-      - .github/qwen_tts_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/verl_pin.txt
       - .github/actions/gpu-smoke-prepare/**
@@ -33,7 +32,6 @@ on:
       - "tests/special_e2e/**"
       - "pyproject.toml"
       - .github/workflows/gpu_smoke.yml
-      - .github/qwen_tts_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/verl_pin.txt
       - .github/actions/gpu-smoke-prepare/**

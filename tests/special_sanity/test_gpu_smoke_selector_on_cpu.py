@@ -32,7 +32,6 @@ def test_qwen3_tts_smoke_files_select_only_omni_e2e_group():
 
     selected = selector.select_group_names(
         [
-            ".github/qwen_tts_pin.txt",
             "examples/grpo_trainer/qwen3_tts/run_qwen3_tts_grpo.sh",
             "tests/special_e2e/build_qwen3_tts_tiny_random.py",
             "tests/special_e2e/run_qwen3_tts_grpo_smoke.sh",

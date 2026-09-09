@@ -37,13 +37,21 @@ Install the engine before the training stack:
 uv pip install -e ".[gpu]" --torch-backend=auto
 uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
 uv pip install -e ".[omni,train,dev]"
+uv pip install --no-deps --reinstall \
+  "qwen-tts @ git+https://github.com/QwenLM/Qwen3-TTS.git@$(cat .github/qwen_tts_pin.txt)"
 ```
 
-The `omni` extra installs qwen-tts and its runtime dependencies, including
-`torchaudio==2.11.0` to match vLLM's Torch pin. The adapter registers the
-upstream config and model with `AutoConfig` and `AutoModelForTextToWaveform`; it
-does not carry a local Transformers compatibility layer. The system `sox`
-executable is also required by qwen-tts.
+The pinned Qwen3-TTS revision is the upstream Transformers 5 support change
+from Qwen3-TTS PR #360. Its package metadata requires Transformers 5.15.1 or
+newer, while this repository intentionally caps Transformers at 5.14.1. The
+`--no-deps` flag preserves that repository-wide cap; the `omni` extra owns the
+runtime dependencies, including `torchaudio==2.11.0` to match vLLM's Torch pin,
+and CI tests the exact Qwen3-TTS revision from `.github/qwen_tts_pin.txt` on this
+stack. The released `qwen-tts==0.1.1` source targets Transformers 4.57.3 and
+cannot be imported unchanged here. The adapter registers the upstream config
+and model with `AutoConfig` and `AutoModelForTextToWaveform`; it does not carry
+a local Transformers compatibility layer. The system `sox` executable is also
+required by qwen-tts.
 
 ## Data
 

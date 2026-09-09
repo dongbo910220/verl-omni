@@ -30,6 +30,14 @@ runs:
         # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.13 as of vLLM 0.28)
         uv pip install --system --break-system-packages veomni==0.1.11 --no-deps
         uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
+        # Re-apply repository constraints after vllm-omni installs its runtime
+        # dependencies, which otherwise downgrade Accelerate to 1.12.
+        uv pip install --system --break-system-packages \
+          "transformers[mistral-common]==5.14.1" "accelerate>=1.14.0"
+        # The released qwen-tts package targets Transformers 4.57.3. Install the
+        # tested upstream Transformers 5 source without changing this repo's stack.
+        uv pip install --system --break-system-packages --no-deps --reinstall \
+          "qwen-tts @ git+https://github.com/QwenLM/Qwen3-TTS.git@$(cat .github/qwen_tts_pin.txt)"
         # NCCL checkpoint engine (diffusion v1 separate_async weight sync).
         uv pip install --system --break-system-packages pyzmq
         uv pip install --system --break-system-packages cupy-cuda12x || uv pip install --system --break-system-packages cupy-cuda13x

@@ -20,6 +20,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from numbers import Integral
 from pprint import pprint
 
 import numpy as np
@@ -1499,7 +1500,22 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         return metric_dict
 
     def _compute_metrics(self, batch_meta: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
-        data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+        data = diffusion_tq_batch_to_dataproto(
+            batch_meta,
+            pad_token_id=self.tokenizer.pad_token_id or 0,
+            select_fields=[
+                "sample_level_rewards",
+                "sample_level_scores",
+                "advantages",
+                "returns",
+                "uid",
+                "extra_fields",
+                "sum_pi_squared",
+                "old_log_probs",
+                "response_mask",
+                "rollout_is_weights",
+            ],
+        )
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
         metrics.update(compute_data_metrics_diffusion(batch=data))
         n_gpus = self.resource_pool_manager.get_n_gpus()
@@ -1508,16 +1524,42 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             if "advantages" in data.batch
             else data.batch["sample_level_scores"].shape[0]
         )
-        responses = data.batch.get("responses")
-        real_images = 0
-        if isinstance(responses, torch.Tensor) and responses.numel() > 0 and responses.dim() >= 4:
-            real_images = int(responses.shape[0])
+        response_shapes = []
+        for tag in batch_meta.tags:
+            shape = tag.get("response_shape") if isinstance(tag, dict) else None
+            if (
+                not isinstance(shape, list | tuple)
+                or not shape
+                or any(isinstance(dim, bool) or not isinstance(dim, Integral) or dim <= 0 for dim in shape)
+            ):
+                response_shapes = []
+                break
+            response_shapes.append(tuple(int(dim) for dim in shape))
+        if (
+            response_shapes
+            and len(response_shapes) == len(batch_meta.tags)
+            and len({len(s) for s in response_shapes}) == 1
+        ):
+            responses_shape = (
+                len(response_shapes),
+                *(max(dims) for dims in zip(*response_shapes, strict=True)),
+            )
+        else:
+            # Shape is observability metadata, not a training input. Historical
+            # and custom TQ writers may omit it; never re-read large responses.
+            responses_shape = None
+            logger.warning(
+                "Train step=%d: response_shape telemetry is unavailable; continuing without image-shape logging.",
+                global_steps,
+            )
+        metrics["training/tq_response_shape_unavailable"] = float(responses_shape is None)
+        real_images = responses_shape[0] if responses_shape is not None and len(responses_shape) >= 4 else "unknown"
         logger.info(
-            "Train step=%d: %d trajectories, %d real images, responses shape=%s",
+            "Train step=%d: %d trajectories, %s real images, responses shape=%s",
             global_steps,
             len(data),
             real_images,
-            tuple(responses.shape) if isinstance(responses, torch.Tensor) else None,
+            responses_shape,
         )
         metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
         metrics.update(compute_throughput_metrics_diffusion(batch=data, timing_raw=timing_raw, n_gpus=n_gpus))

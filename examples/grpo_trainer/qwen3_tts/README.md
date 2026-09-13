@@ -173,7 +173,18 @@ non-quantized Transformers checkpoint before GRPO so both the initial policy
 and frozen reference start from the same Hindi SFT weights. GRPO then creates a
 new zero-initialized LoRA. The merged checkpoint contains no live SFT adapter.
 
-Download the pinned assets:
+Download the ready-to-use merged checkpoint and Whisper:
+
+```bash
+hf download littleFishhhh/Qwen3-TTS-12Hz-0.6B-Hindi-SFT-Merged \
+  --revision e9fe1bdcd485fc4ff4121e7ba8e2385dbb857355 \
+  --local-dir /path/to/qwen3-tts-hindi-sft
+hf download openai/whisper-large-v3-turbo \
+  --revision 41f01f3fe87f28c78e2fbf8b568835947dd65ed9 \
+  --local-dir /path/to/whisper-large-v3-turbo
+```
+
+To recreate the merged checkpoint from the pinned Base model and SFT adapter:
 
 ```bash
 hf download Qwen/Qwen3-TTS-12Hz-0.6B-Base \
@@ -182,14 +193,6 @@ hf download Qwen/Qwen3-TTS-12Hz-0.6B-Base \
 hf download akashicmarga/qwen3-tts-hindi-lora adapters.safetensors \
   --revision a8718cac15b5a40bd4926b47d0854162ff32010a \
   --local-dir /path/to/hindi-sft-mlx
-hf download openai/whisper-large-v3-turbo \
-  --revision 41f01f3fe87f28c78e2fbf8b568835947dd65ed9 \
-  --local-dir /path/to/whisper-large-v3-turbo
-```
-
-Create the SFT starting checkpoint:
-
-```bash
 python examples/grpo_trainer/qwen3_tts/data_process/merge_hindi_sft_lora.py \
   --base-model /path/to/qwen3-tts-base \
   --source /path/to/hindi-sft-mlx/adapters.safetensors \

@@ -28,20 +28,7 @@ import transfer_queue as tq
 from omegaconf import OmegaConf
 from tensordict import NonTensorStack, TensorDict
 
-
-def _metrics_fields() -> list[str]:
-    return [
-        "sample_level_rewards",
-        "sample_level_scores",
-        "advantages",
-        "returns",
-        "uid",
-        "extra_fields",
-        "sum_pi_squared",
-        "old_log_probs",
-        "response_mask",
-        "rollout_is_weights",
-    ]
+from verl_omni.trainer.diffusion.v1.tq_utils import diffusion_metric_tq_fields
 
 
 def _make_sd35_payload(
@@ -170,7 +157,8 @@ def main() -> None:
     ]
     try:
         batch_meta = tq.kv_batch_put(keys=keys, partition_id="benchmark", fields=payload, tags=tags)
-        variants = [("baseline", None), ("projected", _metrics_fields())]
+        metric_fields = diffusion_metric_tq_fields(args.algorithm)
+        variants = [("baseline", None), ("projected", metric_fields)]
         samples = {name: [] for name, _ in variants}
         tensor_bytes = {}
         checksums = {}
@@ -219,7 +207,7 @@ def main() -> None:
                 value.numel() * value.element_size() for value in payload.values() if isinstance(value, torch.Tensor)
             ),
         },
-        "selected_fields": _metrics_fields(),
+        "selected_fields": metric_fields,
         "returned_fields": returned_fields,
         "returned_tensor_bytes": tensor_bytes,
         "tensor_byte_reduction_ratio": 1 - tensor_bytes["projected"] / tensor_bytes["baseline"],

@@ -81,6 +81,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.trainer.diffusion.v1.tq_utils import (
+    diffusion_metric_tq_fields,
     diffusion_tq_batch_to_dataproto,
     put_dataproto_fields_to_tq,
     sort_diffusion_tq_keys,
@@ -1503,18 +1504,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         data = diffusion_tq_batch_to_dataproto(
             batch_meta,
             pad_token_id=self.tokenizer.pad_token_id or 0,
-            select_fields=[
-                "sample_level_rewards",
-                "sample_level_scores",
-                "advantages",
-                "returns",
-                "uid",
-                "extra_fields",
-                "sum_pi_squared",
-                "old_log_probs",
-                "response_mask",
-                "rollout_is_weights",
-            ],
+            select_fields=diffusion_metric_tq_fields(
+                "direct_preference" if self._is_direct_preference else "policy_gradient"
+            ),
         )
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
         metrics.update(compute_data_metrics_diffusion(batch=data))

@@ -62,10 +62,6 @@ def test_metrics_fetches_only_metric_fields_and_preserves_outputs(monkeypatch, c
             {
                 "advantages": torch.tensor([[1.0, -1.0], [2.0, -2.0]]),
                 "returns": torch.tensor([[0.5, -0.5], [1.5, -1.5]]),
-                "sum_pi_squared": torch.full((2, 2), 0.5),
-                "old_log_probs": torch.full((2, 2), -0.5),
-                "response_mask": torch.ones(2, 2),
-                "rollout_is_weights": torch.ones(2, 2),
             }
         )
     reward_extra_info = np.empty(2, dtype=object)
@@ -87,6 +83,7 @@ def test_metrics_fetches_only_metric_fields_and_preserves_outputs(monkeypatch, c
     trainer = SimpleNamespace(
         tokenizer=SimpleNamespace(pad_token_id=7),
         resource_pool_manager=SimpleNamespace(get_n_gpus=lambda: 2),
+        _is_direct_preference=not policy_gradient,
     )
     batch_meta = SimpleNamespace(
         keys=["prompt_0_0", "prompt_1_0"],
@@ -114,18 +111,15 @@ def test_metrics_fetches_only_metric_fields_and_preserves_outputs(monkeypatch, c
         )
 
     selected = set(captured["select_fields"])
-    assert selected == {
+    expected_fields = {
         "sample_level_rewards",
         "sample_level_scores",
-        "advantages",
-        "returns",
         "uid",
         "extra_fields",
-        "sum_pi_squared",
-        "old_log_probs",
-        "response_mask",
-        "rollout_is_weights",
     }
+    if policy_gradient:
+        expected_fields.update({"advantages", "returns"})
+    assert selected == expected_fields
     assert captured["pad_token_id"] == 7
     assert metrics["critic/rewards/mean"] == pytest.approx(2.0)
     assert metrics["critic/rewards/group_size"] == pytest.approx(2.0)
@@ -133,7 +127,7 @@ def test_metrics_fetches_only_metric_fields_and_preserves_outputs(monkeypatch, c
     assert metrics["perf/total_num_images"] == 2
     assert metrics["perf/throughput"] == pytest.approx(0.5)
     assert metrics["training/tq_response_shape_unavailable"] == 0.0
-    assert ("variance_proxy/proxy2_total_power" in metrics) is policy_gradient
+    assert "variance_proxy/proxy2_total_power" not in metrics
     assert "2 trajectories, 2 real images, responses shape=(2, 3, 384, 384)" in caplog.text
 
 
@@ -166,6 +160,7 @@ def test_metrics_keeps_training_when_response_shape_telemetry_is_unavailable(mon
     trainer = SimpleNamespace(
         tokenizer=SimpleNamespace(pad_token_id=0),
         resource_pool_manager=SimpleNamespace(get_n_gpus=lambda: 1),
+        _is_direct_preference=True,
     )
     tags = []
     for response_shape in response_shapes:

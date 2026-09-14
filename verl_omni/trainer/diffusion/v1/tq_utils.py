@@ -14,7 +14,7 @@
 
 import logging
 import os
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -26,6 +26,17 @@ from verl.utils import tensordict_utils as tu
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def diffusion_metric_tq_fields(
+    algorithm: Literal["policy_gradient", "direct_preference"],
+) -> list[str]:
+    """Return fields persisted and consumed by diffusion metric computation."""
+    if algorithm == "policy_gradient":
+        return ["sample_level_rewards", "sample_level_scores", "advantages", "returns", "uid", "extra_fields"]
+    if algorithm == "direct_preference":
+        return ["sample_level_rewards", "sample_level_scores", "uid", "extra_fields"]
+    raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
 
 
 def _unwrap_non_tensor_item(item: Any) -> Any:

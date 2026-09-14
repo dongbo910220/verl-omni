@@ -27,7 +27,7 @@ import pytest
 
 @pytest.fixture(scope="module")
 def scorer():
-    module_path = Path(__file__).parents[3] / "examples/grpo_trainer/qwen3_tts/whisper_cer_scorer.py"
+    module_path = Path(__file__).parents[3] / "examples/grpo_trainer/qwen3_tts/scorer/whisper_cer.py"
     spec = importlib.util.spec_from_file_location("whisper_cer_scorer_test", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -55,6 +55,8 @@ def _fake_scorer(scorer, transcript="सही"):
 
 
 def test_normalization_and_error_rates_preserve_devanagari(scorer):
+    assert scorer.__all__ == ["WhisperCERScorer"]
+    assert scorer.WhisperCERScorer.__doc__
     assert scorer.normalize_text(" नमस्ते।  WORLD—हाँ! ") == "नमस्ते world हाँ"
     assert scorer.char_error_rate("abc", "abc") == 0.0
     assert scorer.char_error_rate("ab", "abc") == pytest.approx(1 / 3)

@@ -225,7 +225,7 @@ selection from leaking into reward-loop workers:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python \
-  examples/grpo_trainer/qwen3_tts/whisper_cer_scorer.py \
+  examples/grpo_trainer/qwen3_tts/scorer/whisper_cer.py \
   --model /path/to/whisper-large-v3-turbo \
   --device cuda:0 --dtype float16 --port 18080
 ```

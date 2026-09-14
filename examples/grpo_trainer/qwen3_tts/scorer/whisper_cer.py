@@ -29,72 +29,18 @@ from typing import Any
 
 import numpy as np
 
-
-def normalize_text(text: str) -> str:
-    normalized = unicodedata.normalize("NFC", str(text))
-    normalized = re.sub(r"[।॥.,!?;:\"'`´’‘“”()\[\]{}<>/\\|@#%^&*_+=~–—-]", " ", normalized).lower()
-    return " ".join(normalized.split())
-
-
-def _edit_distance(reference, hypothesis) -> int:
-    previous = list(range(len(hypothesis) + 1))
-    for row, reference_item in enumerate(reference, 1):
-        current = [row]
-        for column, hypothesis_item in enumerate(hypothesis, 1):
-            current.append(
-                min(
-                    previous[column] + 1,
-                    current[column - 1] + 1,
-                    previous[column - 1] + int(reference_item != hypothesis_item),
-                )
-            )
-        previous = current
-    return previous[-1]
-
-
-def char_error_rate(hypothesis: str, reference: str) -> float:
-    reference = normalize_text(reference)
-    hypothesis = normalize_text(hypothesis)
-    if not reference:
-        return 0.0 if not hypothesis else 1.0
-    return _edit_distance(reference, hypothesis) / len(reference)
-
-
-def decode_request(payload: Any) -> tuple[np.ndarray, int, str, dict]:
-    if not isinstance(payload, dict):
-        raise ValueError("Audio scorer request must be a JSON object.")
-    if payload.get("protocol_version") != "1":
-        raise ValueError("Audio scorer requires protocol_version='1'.")
-    encoded = payload.get("waveform_f32_base64")
-    if not isinstance(encoded, str):
-        raise ValueError("waveform_f32_base64 must be a base64 string.")
-    try:
-        raw = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ValueError("waveform_f32_base64 is not valid base64.") from exc
-    if len(raw) % np.dtype("<f4").itemsize:
-        raise ValueError("Decoded waveform byte length is not float32-aligned.")
-    waveform = np.frombuffer(raw, dtype="<f4").astype(np.float32, copy=True)
-
-    num_samples = payload.get("num_samples")
-    if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples != waveform.size:
-        raise ValueError(f"num_samples does not match the decoded waveform: {num_samples!r} != {waveform.size}.")
-    sample_rate = payload.get("sample_rate")
-    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
-        raise ValueError(f"sample_rate must be a positive integer, got {sample_rate!r}.")
-    if not np.isfinite(waveform).all():
-        raise ValueError("Decoded waveform contains NaN or infinity.")
-
-    prompt = payload.get("prompt")
-    if not isinstance(prompt, str) or not normalize_text(prompt):
-        raise ValueError("Audio scorer requires a non-empty prompt.")
-    metadata = payload.get("metadata")
-    if not isinstance(metadata, dict):
-        raise ValueError("metadata must be a JSON object.")
-    return waveform, sample_rate, prompt, metadata
+__all__ = ["WhisperCERScorer"]
 
 
 class WhisperCERScorer:
+    """Transcribe generated speech with Whisper and return a capped CER reward.
+
+    The scorer is independent of the speech-generation model. Callers provide a
+    mono float32 waveform, its sample rate, the reference text, and optional
+    metadata. ``score`` returns the audio reward together with the raw and capped
+    CER, transcript, normalized texts, and sample ID.
+    """
+
     def __init__(
         self,
         model: str,
@@ -178,6 +124,70 @@ class WhisperCERScorer:
             "normalized_hypothesis": normalize_text(transcript),
             "sample_id": str(sample_id),
         }
+
+
+def normalize_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFC", str(text))
+    normalized = re.sub(r"[।॥.,!?;:\"'`´’‘“”()\[\]{}<>/\\|@#%^&*_+=~–—-]", " ", normalized).lower()
+    return " ".join(normalized.split())
+
+
+def _edit_distance(reference, hypothesis) -> int:
+    previous = list(range(len(hypothesis) + 1))
+    for row, reference_item in enumerate(reference, 1):
+        current = [row]
+        for column, hypothesis_item in enumerate(hypothesis, 1):
+            current.append(
+                min(
+                    previous[column] + 1,
+                    current[column - 1] + 1,
+                    previous[column - 1] + int(reference_item != hypothesis_item),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def char_error_rate(hypothesis: str, reference: str) -> float:
+    reference = normalize_text(reference)
+    hypothesis = normalize_text(hypothesis)
+    if not reference:
+        return 0.0 if not hypothesis else 1.0
+    return _edit_distance(reference, hypothesis) / len(reference)
+
+
+def decode_request(payload: Any) -> tuple[np.ndarray, int, str, dict]:
+    if not isinstance(payload, dict):
+        raise ValueError("Audio scorer request must be a JSON object.")
+    if payload.get("protocol_version") != "1":
+        raise ValueError("Audio scorer requires protocol_version='1'.")
+    encoded = payload.get("waveform_f32_base64")
+    if not isinstance(encoded, str):
+        raise ValueError("waveform_f32_base64 must be a base64 string.")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("waveform_f32_base64 is not valid base64.") from exc
+    if len(raw) % np.dtype("<f4").itemsize:
+        raise ValueError("Decoded waveform byte length is not float32-aligned.")
+    waveform = np.frombuffer(raw, dtype="<f4").astype(np.float32, copy=True)
+
+    num_samples = payload.get("num_samples")
+    if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples != waveform.size:
+        raise ValueError(f"num_samples does not match the decoded waveform: {num_samples!r} != {waveform.size}.")
+    sample_rate = payload.get("sample_rate")
+    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
+        raise ValueError(f"sample_rate must be a positive integer, got {sample_rate!r}.")
+    if not np.isfinite(waveform).all():
+        raise ValueError("Decoded waveform contains NaN or infinity.")
+
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) or not normalize_text(prompt):
+        raise ValueError("Audio scorer requires a non-empty prompt.")
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError("metadata must be a JSON object.")
+    return waveform, sample_rate, prompt, metadata
 
 
 class WhisperCERHTTPServer(ThreadingHTTPServer):

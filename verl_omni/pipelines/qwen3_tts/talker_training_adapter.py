@@ -13,6 +13,8 @@
 # limitations under the License.
 """Qwen3-TTS talker actor adapter."""
 
+# TODO: Use native Transformers Qwen3-TTS support when it becomes available.
+
 import logging
 import types
 from collections.abc import Mapping

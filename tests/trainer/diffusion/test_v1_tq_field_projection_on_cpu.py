@@ -95,7 +95,7 @@ def test_metrics_fetches_only_metric_fields_and_preserves_outputs(monkeypatch, c
     monkeypatch.setattr(trainer_base_module, "diffusion_tq_batch_to_dataproto", get_data)
     trainer = SimpleNamespace(
         tokenizer=SimpleNamespace(pad_token_id=7),
-        resource_pool_manager=SimpleNamespace(get_n_gpus=lambda: 2),
+        _get_n_gpus_for_throughput=lambda: 2,
         _is_direct_preference=not policy_gradient,
     )
     batch_meta = SimpleNamespace(
@@ -172,7 +172,7 @@ def test_metrics_keeps_training_when_response_shape_telemetry_is_unavailable(mon
     monkeypatch.setattr(trainer_base_module, "diffusion_tq_batch_to_dataproto", get_data)
     trainer = SimpleNamespace(
         tokenizer=SimpleNamespace(pad_token_id=0),
-        resource_pool_manager=SimpleNamespace(get_n_gpus=lambda: 1),
+        _get_n_gpus_for_throughput=lambda: 1,
         _is_direct_preference=True,
     )
     tags = []
@@ -216,7 +216,7 @@ def test_metrics_ignores_padding_without_response_shape(monkeypatch, caplog):
     monkeypatch.setattr(trainer_base_module, "diffusion_tq_batch_to_dataproto", lambda *args, **kwargs: data)
     trainer = SimpleNamespace(
         tokenizer=SimpleNamespace(pad_token_id=0),
-        resource_pool_manager=SimpleNamespace(get_n_gpus=lambda: 1),
+        _get_n_gpus_for_throughput=lambda: 1,
         _is_direct_preference=True,
     )
     batch_meta = SimpleNamespace(

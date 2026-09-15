@@ -24,7 +24,7 @@ from verl_omni.trainer.diffusion.v1 import tq_utils
 from verl_omni.trainer.diffusion.v1 import trainer_base as trainer_base_module
 
 
-def test_tq_conversion_forwards_field_projection(monkeypatch):
+def test_tq_conversion_forwards_field_projection_and_unpacks_extra_fields(monkeypatch):
     captured = {}
 
     def get_fields(**kwargs):
@@ -32,10 +32,14 @@ def test_tq_conversion_forwards_field_projection(monkeypatch):
         return {
             "sample_level_rewards": torch.ones(2, 3),
             "uid": ["first", "second"],
+            "extra_fields": [
+                {"reward_extra_info": {"ocr": 0.25}},
+                {"reward_extra_info": {"ocr": 0.75}},
+            ],
         }
 
     monkeypatch.setattr(tq_utils.tq, "kv_batch_get", get_fields)
-    selected = ["sample_level_rewards", "uid"]
+    selected = ["sample_level_rewards", "uid", "extra_fields"]
 
     data = tq_utils.diffusion_tq_batch_to_dataproto(
         SimpleNamespace(keys=["first_0_0", "second_0_0"], partition_id="train"),
@@ -49,6 +53,15 @@ def test_tq_conversion_forwards_field_projection(monkeypatch):
     }
     assert set(data.batch.keys()) == {"sample_level_rewards"}
     assert data.non_tensor_batch["uid"].tolist() == ["first", "second"]
+    assert data.non_tensor_batch["reward_extra_info"].tolist() == [{"ocr": 0.25}, {"ocr": 0.75}]
+
+
+@pytest.mark.parametrize("algorithm", ["policy_gradient", "direct_preference"])
+def test_metric_projection_is_subset_of_persisted_and_rollout_fields(algorithm):
+    rollout_fields = {"uid", "extra_fields"}
+    available_fields = set(tq_utils.diffusion_persisted_tq_fields(algorithm)) | rollout_fields
+
+    assert set(tq_utils.diffusion_metric_tq_fields(algorithm)).issubset(available_fields)
 
 
 @pytest.mark.parametrize("policy_gradient", [True, False])
@@ -190,3 +203,47 @@ def test_metrics_keeps_training_when_response_shape_telemetry_is_unavailable(mon
     assert "responses" not in captured["select_fields"]
     assert "response_shape telemetry is unavailable" in caplog.text
     assert f"{batch_size} trajectories, unknown real images, responses shape=None" in caplog.text
+
+
+def test_metrics_ignores_padding_without_response_shape(monkeypatch, caplog):
+    data = DataProto.from_dict(
+        tensors={
+            "sample_level_rewards": torch.ones(2, 1),
+            "sample_level_scores": torch.ones(2, 1),
+        }
+    )
+
+    monkeypatch.setattr(trainer_base_module, "diffusion_tq_batch_to_dataproto", lambda *args, **kwargs: data)
+    trainer = SimpleNamespace(
+        tokenizer=SimpleNamespace(pad_token_id=0),
+        resource_pool_manager=SimpleNamespace(get_n_gpus=lambda: 1),
+        _is_direct_preference=True,
+    )
+    batch_meta = SimpleNamespace(
+        keys=["sample_0_0", "padding_0_0"],
+        tags=[
+            {
+                "response_shape": (3, 256, 256),
+                "is_padding": False,
+                "min_global_steps": 0,
+                "max_global_steps": 0,
+            },
+            {"is_padding": True, "min_global_steps": 0, "max_global_steps": 0},
+        ],
+        partition_id="train",
+    )
+    metrics = {}
+
+    with caplog.at_level(logging.INFO, logger=trainer_base_module.logger.name):
+        trainer_base_module.PolicyGradientDiffusionTrainerV1._compute_metrics(
+            trainer,
+            batch_meta,
+            metrics,
+            {"step": 1.0},
+            global_steps=1,
+            epoch=0,
+        )
+
+    assert metrics["training/tq_response_shape_unavailable"] == 0.0
+    assert "response_shape telemetry is unavailable" not in caplog.text
+    assert "2 trajectories, 1 real images, responses shape=(1, 3, 256, 256)" in caplog.text

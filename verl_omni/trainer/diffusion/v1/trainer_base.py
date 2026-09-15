@@ -82,6 +82,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.trainer.diffusion.v1.tq_utils import (
     diffusion_metric_tq_fields,
+    diffusion_persisted_tq_fields,
     diffusion_tq_batch_to_dataproto,
     put_dataproto_fields_to_tq,
     sort_diffusion_tq_keys,
@@ -466,7 +467,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         put_dataproto_fields_to_tq(
             batch_meta,
             data_for_tq,
-            fields=["old_log_probs", "advantages", "returns", "sample_level_scores", "sample_level_rewards"],
+            fields=diffusion_persisted_tq_fields("policy_gradient"),
         )
         return batch_meta
 
@@ -565,7 +566,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             put_dataproto_fields_to_tq(
                 batch_meta,
                 data_for_tq,
-                fields=["sample_level_scores", "sample_level_rewards"],
+                fields=diffusion_persisted_tq_fields("direct_preference"),
             )
             data = self._prepare_actor_batch(data, reward_tensor)
             data.batch["sample_level_rewards"] = data.batch["sample_level_scores"]
@@ -1532,8 +1533,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             if "advantages" in data.batch
             else data.batch["sample_level_scores"].shape[0]
         )
+        response_shape_tags = [tag for tag in batch_meta.tags if not tag.get("is_padding", False)]
         response_shapes = []
-        for tag in batch_meta.tags:
+        for tag in response_shape_tags:
             shape = tag.get("response_shape") if isinstance(tag, dict) else None
             if (
                 not isinstance(shape, list | tuple)
@@ -1545,7 +1547,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             response_shapes.append(tuple(int(dim) for dim in shape))
         if (
             response_shapes
-            and len(response_shapes) == len(batch_meta.tags)
+            and len(response_shapes) == len(response_shape_tags)
             and len({len(s) for s in response_shapes}) == 1
         ):
             responses_shape = (

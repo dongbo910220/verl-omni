@@ -28,6 +28,17 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
+def diffusion_persisted_tq_fields(
+    algorithm: Literal["policy_gradient", "direct_preference"],
+) -> list[str]:
+    """Return trainer-computed fields persisted after a diffusion update."""
+    if algorithm == "policy_gradient":
+        return ["old_log_probs", "advantages", "returns", "sample_level_scores", "sample_level_rewards"]
+    if algorithm == "direct_preference":
+        return ["sample_level_scores", "sample_level_rewards"]
+    raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
+
+
 def diffusion_metric_tq_fields(
     algorithm: Literal["policy_gradient", "direct_preference"],
 ) -> list[str]:
